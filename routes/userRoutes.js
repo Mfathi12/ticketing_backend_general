@@ -5,13 +5,21 @@ const { authenticateToken, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
-// 3. Add user to company (company owner only)
+// 3. Add user to company (company owner only) — uses active company from JWT / x-company-id
 router.post('/add-account', authenticateToken, async (req, res) => {
     try {
-        const { companyId, name, title, email, password, role } = req.body;
+        const { name, title, email, password, role } = req.body;
 
-        if (!companyId || !name || !title || !email) {
-            return res.status(400).json({ message: 'companyId, name, title and email are required' });
+        if (!req.companyId) {
+            return res.status(400).json({
+                message: 'Active company required. Log in with a company, register a company, or call POST /api/auth/switch-company.'
+            });
+        }
+
+        const companyId = req.companyId.toString();
+
+        if (!name || !title || !email) {
+            return res.status(400).json({ message: 'name, title and email are required' });
         }
 
         const ownerMembership = (req.user.companies || []).find(
@@ -261,11 +269,49 @@ router.post('/unregister-fcm-token', authenticateToken, async (req, res) => {
     }
 });
 
-// Get all users (Admin/Manager only)
-router.get('/all-users', authenticateToken, requireRole(['admin', 'manager']), async (req, res) => {
+// Get users for the active company only (owner or company admin/manager)
+router.get('/all-users', authenticateToken, async (req, res) => {
     try {
-        const users = await User.find({}).select('-password');
-        res.json({ users });
+        if (!req.companyId) {
+            return res.status(400).json({
+                message: 'Active company required. Log in with a company, register a company, or call POST /api/auth/switch-company.'
+            });
+        }
+
+        const m = req.companyMembership;
+        const canList =
+            m &&
+            (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
+
+        if (!canList) {
+            return res.status(403).json({ message: 'Insufficient permissions to list users for this company' });
+        }
+
+        const company = await Company.findById(req.companyId).populate({
+            path: 'members.user',
+            select: '-password'
+        });
+
+        if (!company) {
+            return res.status(404).json({ message: 'Company not found' });
+        }
+
+        const users = (company.members || [])
+            .map((mem) => {
+                if (!mem.user) return null;
+                const u = mem.user.toObject ? mem.user.toObject() : { ...mem.user };
+                return {
+                    ...u,
+                    companyMemberRole: mem.role,
+                    companyIsOwner: mem.isOwner
+                };
+            })
+            .filter(Boolean);
+
+        res.json({
+            companyId: req.companyId,
+            users
+        });
     } catch (error) {
         console.error('Get all users error:', error);
         res.status(500).json({ message: 'Internal server error' });

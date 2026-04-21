@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { User, Company } = require('../models');
 const { sendOTPEmail } = require('../services/emailService');
+const { authenticateToken } = require('../middleware/auth');
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
@@ -73,13 +74,19 @@ router.post('/register-company', async (req, res) => {
         }
 
         const token = jwt.sign(
-            { userId: ownerUser._id, email: ownerUser.email, role: ownerUser.role },
+            {
+                userId: ownerUser._id,
+                email: ownerUser.email,
+                role: ownerUser.role,
+                companyId: company._id.toString()
+            },
             JWT_SECRET
         );
 
         res.status(201).json({
             message: 'Company registered successfully',
             token,
+            activeCompanyId: company._id,
             company: {
                 id: company._id,
                 name: company.name,
@@ -104,7 +111,7 @@ router.post('/register-company', async (req, res) => {
 // 1. Login via email and password
 router.post('/login', async (req, res) => {
     try {
-        const { email, password, token: fcmToken } = req.body;
+        const { email, password, companyId: bodyCompanyId, token: fcmToken } = req.body;
 
         if (!email || !password) {
             return res.status(400).json({ message: 'Email and password are required' });
@@ -132,11 +139,6 @@ router.post('/login', async (req, res) => {
             }
         }
 
-        const token = jwt.sign(
-            { userId: user._id, email: user.email, role: user.role },
-            JWT_SECRET
-        );
-
         const companyIds = (user.companies || []).map((entry) => entry.company).filter(Boolean);
         const companies = companyIds.length
             ? await Company.find({ _id: { $in: companyIds } }).select('name email ownerUser')
@@ -154,9 +156,40 @@ router.post('/login', async (req, res) => {
             };
         });
 
+        const memberships = user.companies || [];
+        let activeCompanyId = null;
+
+        if (bodyCompanyId) {
+            const cid = String(bodyCompanyId).trim();
+            const ok = memberships.some((e) => e.company && e.company.toString() === cid);
+            if (!ok) {
+                return res.status(403).json({ message: 'You are not a member of the selected company' });
+            }
+            activeCompanyId = cid;
+        } else if (memberships.length === 1) {
+            activeCompanyId = memberships[0].company.toString();
+        } else if (memberships.length > 1) {
+            return res.status(400).json({
+                message: 'companyId is required: you belong to more than one company',
+                companies: companiesWithMembership
+            });
+        }
+
+        const payload = {
+            userId: user._id,
+            email: user.email,
+            role: user.role
+        };
+        if (activeCompanyId) {
+            payload.companyId = activeCompanyId;
+        }
+
+        const token = jwt.sign(payload, JWT_SECRET);
+
         res.json({
             message: 'Login successful',
             token,
+            activeCompanyId: activeCompanyId || null,
             user: {
                 id: user._id,
                 name: user.name,
@@ -168,6 +201,42 @@ router.post('/login', async (req, res) => {
         });
     } catch (error) {
         console.error('Login error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+// Switch active company (new JWT with companyId)
+router.post('/switch-company', authenticateToken, async (req, res) => {
+    try {
+        const { companyId } = req.body;
+        if (!companyId) {
+            return res.status(400).json({ message: 'companyId is required' });
+        }
+        const cid = String(companyId).trim();
+        const membership = (req.user.companies || []).find(
+            (e) => e.company && e.company.toString() === cid
+        );
+        if (!membership) {
+            return res.status(403).json({ message: 'You are not a member of this company' });
+        }
+
+        const token = jwt.sign(
+            {
+                userId: req.user._id,
+                email: req.user.email,
+                role: req.user.role,
+                companyId: cid
+            },
+            JWT_SECRET
+        );
+
+        res.json({
+            message: 'Company context updated',
+            token,
+            activeCompanyId: cid
+        });
+    } catch (error) {
+        console.error('Switch company error:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 });
