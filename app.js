@@ -642,10 +642,14 @@ db.once('open', async () => {
     }, intervalMs);
 });
 
-server.listen(port, () => {
-    console.log(`\n🚀 Server started on port: ${port}`);
-    console.log(`📡 Socket.io server ready at http://localhost:${port}/socket.io/`);
-    console.log(`🔗 Health check: http://localhost:${port}/health`);
-    console.log(`🧪 Test endpoint: http://localhost:${port}/api/test`);
-    console.log(`\n⏳ Waiting for socket connections...\n`);
-});
+if (!process.env.VERCEL) {
+    server.listen(port, () => {
+        console.log(`\n🚀 Server started on port: ${port}`);
+        console.log(`📡 Socket.io server ready at http://localhost:${port}/socket.io/`);
+        console.log(`🔗 Health check: http://localhost:${port}/health`);
+        console.log(`🧪 Test endpoint: http://localhost:${port}/api/test`);
+        console.log(`\n⏳ Waiting for socket connections...\n`);
+    });
+}
+
+module.exports = app;
