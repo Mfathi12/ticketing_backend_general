@@ -1,6 +1,6 @@
 const express = require('express');
 const { authenticateToken } = require('../middleware/auth');
-const { uploadMultiple } = require('../middleware/upload');
+const { uploadMultiple, uploadsDir } = require('../middleware/upload');
 const path = require('path');
 
 const router = express.Router();
@@ -44,7 +44,7 @@ router.delete('/ticket-images/:filename', authenticateToken, (req, res) => {
         const fs = require('fs');
         const path = require('path');
         
-        const filePath = path.join(__dirname, '../uploads/tickets', filename);
+        const filePath = path.join(uploadsDir, filename);
         
         // Check if file exists
         if (fs.existsSync(filePath)) {

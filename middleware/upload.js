@@ -2,10 +2,18 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
+const isVercel = Boolean(process.env.VERCEL);
+const uploadsDir = process.env.UPLOADS_DIR
+    ? path.resolve(process.env.UPLOADS_DIR)
+    : (isVercel ? '/tmp/uploads/tickets' : path.join(__dirname, '../uploads/tickets'));
+
 // Create uploads directory if it doesn't exist
-const uploadsDir = path.join(__dirname, '../uploads/tickets');
-if (!fs.existsSync(uploadsDir)) {
-    fs.mkdirSync(uploadsDir, { recursive: true });
+try {
+    if (!fs.existsSync(uploadsDir)) {
+        fs.mkdirSync(uploadsDir, { recursive: true });
+    }
+} catch (error) {
+    console.error('Failed to initialize uploads directory:', uploadsDir, error.message);
 }
 
 // Configure storage
@@ -51,6 +59,7 @@ const upload = multer({
 const uploadMultiple = upload.array('images', 10); // Max 10 images
 
 module.exports = {
+    uploadsDir,
     uploadMultiple,
     uploadSingle: upload.single('image')
 };
