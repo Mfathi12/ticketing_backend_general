@@ -1,40 +1,34 @@
 const mongoose = require('mongoose');
 
-const userSchema = new mongoose.Schema({
+const companySchema = new mongoose.Schema({
     name: {
         type: String,
         required: true,
         trim: true
     },
-    title: {
+    logo: {
         type: String,
-        required: true,
+        default: '',
         trim: true
     },
     email: {
         type: String,
         required: true,
-        unique: true,
         lowercase: true,
         trim: true
     },
-    password: {
-        type: String,
-        required: true,
-        minlength: 6
+    ownerUser: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true
     },
-    role: {
-        type: String,
-        enum: ['admin', 'manager', 'developer', 'tester', 'user'],
-        default: 'user'
-    },
-    companies: [{
-        company: {
+    members: [{
+        user: {
             type: mongoose.Schema.Types.ObjectId,
-            ref: 'Company',
+            ref: 'User',
             required: true
         },
-        companyRole: {
+        role: {
             type: String,
             enum: ['owner', 'admin', 'manager', 'developer', 'tester', 'user'],
             default: 'user'
@@ -43,14 +37,9 @@ const userSchema = new mongoose.Schema({
             type: Boolean,
             default: false
         }
-    }],
-    // Store FCM device tokens for push notifications
-    fcmTokens: {
-        type: [String],
-        default: []
-    }
+    }]
 }, {
     timestamps: true
 });
 
-module.exports = mongoose.model('User', userSchema);
+module.exports = mongoose.model('Company', companySchema);

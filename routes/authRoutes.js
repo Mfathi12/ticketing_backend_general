@@ -1,7 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { User } = require('../models');
+const { User, Company } = require('../models');
 const { sendOTPEmail } = require('../services/emailService');
 
 const router = express.Router();
@@ -14,6 +14,94 @@ const otpStore = new Map();
 const generateOTP = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
 };
+
+// 0. Register company (SaaS tenant) with owner account
+router.post('/register-company', async (req, res) => {
+    try {
+        const { companyName, logo, email, password } = req.body;
+
+        if (!companyName || !email || !password) {
+            return res.status(400).json({ message: 'companyName, email and password are required' });
+        }
+
+        if (password.length < 6) {
+            return res.status(400).json({ message: 'Password must be at least 6 characters' });
+        }
+
+        const normalizedEmail = email.toLowerCase().trim();
+
+        let ownerUser = await User.findOne({ email: normalizedEmail });
+
+        if (ownerUser) {
+            const isPasswordValid = await bcrypt.compare(password, ownerUser.password);
+            if (!isPasswordValid) {
+                return res.status(401).json({ message: 'Invalid credentials for existing user' });
+            }
+        } else {
+            const hashedPassword = await bcrypt.hash(password, 12);
+            ownerUser = await User.create({
+                name: companyName.trim(),
+                title: 'Owner',
+                email: normalizedEmail,
+                password: hashedPassword,
+                role: 'admin'
+            });
+        }
+
+        const company = await Company.create({
+            name: companyName.trim(),
+            logo: typeof logo === 'string' ? logo.trim() : '',
+            email: normalizedEmail,
+            ownerUser: ownerUser._id,
+            members: [{
+                user: ownerUser._id,
+                role: 'owner',
+                isOwner: true
+            }]
+        });
+
+        const alreadyMember = ownerUser.companies?.some(
+            (entry) => entry.company?.toString() === company._id.toString()
+        );
+
+        if (!alreadyMember) {
+            ownerUser.companies.push({
+                company: company._id,
+                companyRole: 'owner',
+                isOwner: true
+            });
+            await ownerUser.save();
+        }
+
+        const token = jwt.sign(
+            { userId: ownerUser._id, email: ownerUser.email, role: ownerUser.role },
+            JWT_SECRET
+        );
+
+        res.status(201).json({
+            message: 'Company registered successfully',
+            token,
+            company: {
+                id: company._id,
+                name: company.name,
+                logo: company.logo,
+                email: company.email,
+                ownerUser: company.ownerUser
+            },
+            user: {
+                id: ownerUser._id,
+                name: ownerUser.name,
+                title: ownerUser.title,
+                email: ownerUser.email,
+                role: ownerUser.role,
+                companies: ownerUser.companies
+            }
+        });
+    } catch (error) {
+        console.error('Register company error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
 
 // 1. Login via email and password
 router.post('/login', async (req, res) => {
@@ -51,6 +139,23 @@ router.post('/login', async (req, res) => {
             JWT_SECRET
         );
 
+        const companyIds = (user.companies || []).map((entry) => entry.company).filter(Boolean);
+        const companies = companyIds.length
+            ? await Company.find({ _id: { $in: companyIds } }).select('name logo email ownerUser')
+            : [];
+
+        const companiesWithMembership = (user.companies || []).map((entry) => {
+            const matchedCompany = companies.find(
+                (company) => company._id.toString() === entry.company.toString()
+            );
+            return {
+                companyId: entry.company,
+                companyRole: entry.companyRole,
+                isOwner: entry.isOwner,
+                company: matchedCompany || null
+            };
+        });
+
         res.json({
             message: 'Login successful',
             token,
@@ -59,7 +164,8 @@ router.post('/login', async (req, res) => {
                 name: user.name,
                 title: user.title,
                 email: user.email,
-                role: user.role
+                role: user.role,
+                companies: companiesWithMembership
             }
         });
     } catch (error) {

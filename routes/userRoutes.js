@@ -1,45 +1,88 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
-const { User } = require('../models');
+const { User, Company } = require('../models');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
-// 3. Add new account (Admin/Manager only)
-router.post('/add-account', authenticateToken, requireRole(['admin', 'manager']), async (req, res) => {
+// 3. Add user to company (company owner only)
+router.post('/add-account', authenticateToken, async (req, res) => {
     try {
-        const { name, title, email, password, role } = req.body;
+        const { companyId, name, title, email, password, role } = req.body;
 
-        if (!name || !title || !email || !password) {
-            return res.status(400).json({ message: 'Name, title, email, and password are required' });
+        if (!companyId || !name || !title || !email) {
+            return res.status(400).json({ message: 'companyId, name, title and email are required' });
         }
 
-        const existingUser = await User.findOne({ email: email.toLowerCase() });
-        if (existingUser) {
-            return res.status(400).json({ message: 'User with this email already exists' });
+        const ownerMembership = (req.user.companies || []).find(
+            (entry) => entry.company.toString() === companyId && entry.isOwner
+        );
+        if (!ownerMembership) {
+            return res.status(403).json({ message: 'Only company owner can add users' });
         }
-        
 
-        const hashedPassword = await bcrypt.hash(password, 12);
+        const normalizedEmail = email.toLowerCase().trim();
+        let targetUser = await User.findOne({ email: normalizedEmail });
+        const companyRole = role || 'user';
 
-        const newUser = new User({
-            name,
-            title,
-            email: email.toLowerCase(),
-            password: hashedPassword,
-            role: role || 'user'
-        });
+        if (!targetUser) {
+            if (!password) {
+                return res.status(400).json({ message: 'password is required when creating a new user' });
+            }
+            const hashedPassword = await bcrypt.hash(password, 12);
+            targetUser = await User.create({
+                name,
+                title,
+                email: normalizedEmail,
+                password: hashedPassword,
+                role: companyRole,
+                companies: [{
+                    company: companyId,
+                    companyRole,
+                    isOwner: false
+                }]
+            });
+        } else {
+            const alreadyInCompany = (targetUser.companies || []).some(
+                (entry) => entry.company.toString() === companyId
+            );
+            if (alreadyInCompany) {
+                return res.status(400).json({ message: 'User is already a member of this company' });
+            }
 
-        await newUser.save();
+            targetUser.companies.push({
+                company: companyId,
+                companyRole,
+                isOwner: false
+            });
+            await targetUser.save();
+        }
+
+        const company = await Company.findById(companyId);
+        if (!company) {
+            return res.status(404).json({ message: 'Company not found' });
+        }
+
+        const userExistsInCompany = (company.members || []).some(
+            (member) => member.user.toString() === targetUser._id.toString()
+        );
+        if (!userExistsInCompany) {
+            company.members.push({
+                user: targetUser._id,
+                role: companyRole,
+                isOwner: false
+            });
+            await company.save();
+        }
 
         res.status(201).json({
-            message: 'Account created successfully',
+            message: 'User added to company successfully',
             user: {
-                id: newUser._id,
-                name: newUser.name,
-                title: newUser.title,
-                email: newUser.email,
-                role: newUser.role
+                id: targetUser._id,
+                name: targetUser.name,
+                title: targetUser.title,
+                email: targetUser.email,
+                role: targetUser.role
             }
         });
     } catch (error) {

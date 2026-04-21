@@ -3,6 +3,7 @@ const Project = require('./project');
 const Ticket = require('./ticket');
 const { Conversation, Message } = require('./chat');
 const Notification = require('./notification');
+const Company = require('./company');
 
 module.exports = {
     User,
@@ -10,5 +11,6 @@ module.exports = {
     Ticket,
     Conversation,
     Message,
-    Notification
+    Notification,
+    Company
 };

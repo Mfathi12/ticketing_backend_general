@@ -609,6 +609,9 @@ app.use('/api/notifications', notificationRoutes);
 app.get('/health', (req, res) => {
     res.json({ message: 'ABSAI Ticket Management API is running!' });
 });
+app.get('/', (req, res) => {
+    res.json({ message: 'ABSAI Ticket Management API is running!' });
+});
 
 // DB connection
 // mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://yoabbasabsai_db_user:CwztQRUcUQmp9bye@tickets.nahoztg.mongodb.net/ticketDB?retryWrites=true&w=majority&appName=tickets');
