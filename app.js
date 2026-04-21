@@ -614,8 +614,14 @@ app.get('/', (req, res) => {
 });
 
 // DB connection
-// mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://yoabbasabsai_db_user:CwztQRUcUQmp9bye@tickets.nahoztg.mongodb.net/ticketDB?retryWrites=true&w=majority&appName=tickets');
-mongoose.connect('mongodb+srv://mariamfathi17_db_user:oYMO0tN0jWttsBNL@cluster0.lsbyksm.mongodb.net/?appName=Cluster0');
+const mongoUri = process.env.MONGODB_URI;
+if (!mongoUri) {
+    console.error('MONGODB_URI is not set');
+} else {
+    mongoose.connect(mongoUri).catch((error) => {
+        console.error('MongoDB connection failed:', error.message);
+    });
+}
 
 const db = mongoose.connection;
 db.on('error', (error) => {
@@ -625,21 +631,23 @@ db.on('error', (error) => {
 db.once('open', async () => {
     console.log("Connection successful to database!");
 
-    // Seed default admin user
-    await seedDefaultAdmin();
+    if (!process.env.VERCEL) {
+        // Seed default admin user in persistent server only
+        await seedDefaultAdmin();
 
-    // Start periodic attendance reminder job after DB is connected
-    const intervalMinutes = parseInt(process.env.ATTENDANCE_REMINDER_INTERVAL_MINUTES || '15', 10);
-    const intervalMs = Math.max(intervalMinutes, 5) * 60 * 1000; // minimum 5 minutes
+        // Start periodic attendance reminder job after DB is connected
+        const intervalMinutes = parseInt(process.env.ATTENDANCE_REMINDER_INTERVAL_MINUTES || '15', 10);
+        const intervalMs = Math.max(intervalMinutes, 5) * 60 * 1000; // minimum 5 minutes
 
-    console.log(`Starting attendance reminder job every ${intervalMs / (60 * 1000)} minutes`);
+        console.log(`Starting attendance reminder job every ${intervalMs / (60 * 1000)} minutes`);
 
-    setInterval(() => {
-        processMidnightAttendanceRollover()
-            .catch(err => console.error('Attendance midnight rollover error:', err));
-        sendEightHourCheckoutReminders()
-            .catch(err => console.error('Attendance reminder interval error:', err));
-    }, intervalMs);
+        setInterval(() => {
+            processMidnightAttendanceRollover()
+                .catch(err => console.error('Attendance midnight rollover error:', err));
+            sendEightHourCheckoutReminders()
+                .catch(err => console.error('Attendance reminder interval error:', err));
+        }, intervalMs);
+    }
 });
 
 if (!process.env.VERCEL) {
