@@ -57,3 +57,5 @@ Thumbs.db
 
 # PM2
 .pm2/
+
+*.json
