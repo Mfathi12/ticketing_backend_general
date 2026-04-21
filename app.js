@@ -612,7 +612,7 @@ app.get('/health', (req, res) => {
 
 // DB connection
 // mongoose.connect(process.env.MONGODB_URI || 'mongodb+srv://yoabbasabsai_db_user:CwztQRUcUQmp9bye@tickets.nahoztg.mongodb.net/ticketDB?retryWrites=true&w=majority&appName=tickets');
-mongoose.connect('mongodb://ticketing_user:TicketApp2025!@localhost:27017/ticketing_db?authSource=ticketing_db');
+mongoose.connect('mongodb+srv://mariamfathi17_db_user:oYMO0tN0jWttsBNL@cluster0.lsbyksm.mongodb.net/?appName=Cluster0');
 
 const db = mongoose.connection;
 db.on('error', (error) => {
