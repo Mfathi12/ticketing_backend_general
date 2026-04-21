@@ -18,7 +18,7 @@ const generateOTP = () => {
 // 0. Register company (SaaS tenant) with owner account
 router.post('/register-company', async (req, res) => {
     try {
-        const { companyName, logo, email, password } = req.body;
+        const { companyName, email, password } = req.body;
 
         if (!companyName || !email || !password) {
             return res.status(400).json({ message: 'companyName, email and password are required' });
@@ -50,7 +50,6 @@ router.post('/register-company', async (req, res) => {
 
         const company = await Company.create({
             name: companyName.trim(),
-            logo: typeof logo === 'string' ? logo.trim() : '',
             email: normalizedEmail,
             ownerUser: ownerUser._id,
             members: [{
@@ -84,7 +83,6 @@ router.post('/register-company', async (req, res) => {
             company: {
                 id: company._id,
                 name: company.name,
-                logo: company.logo,
                 email: company.email,
                 ownerUser: company.ownerUser
             },
@@ -141,7 +139,7 @@ router.post('/login', async (req, res) => {
 
         const companyIds = (user.companies || []).map((entry) => entry.company).filter(Boolean);
         const companies = companyIds.length
-            ? await Company.find({ _id: { $in: companyIds } }).select('name logo email ownerUser')
+            ? await Company.find({ _id: { $in: companyIds } }).select('name email ownerUser')
             : [];
 
         const companiesWithMembership = (user.companies || []).map((entry) => {

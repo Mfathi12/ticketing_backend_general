@@ -6,11 +6,6 @@ const companySchema = new mongoose.Schema({
         required: true,
         trim: true
     },
-    logo: {
-        type: String,
-        default: '',
-        trim: true
-    },
     email: {
         type: String,
         required: true,
