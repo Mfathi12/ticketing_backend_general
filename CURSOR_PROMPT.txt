@@ -1,0 +1,42 @@
+I need to migrate my frontend from base64 image uploads to file uploads. The backend has been updated with the following changes:
+
+**Backend Changes:**
+1. New endpoint: POST /api/upload/ticket-images - accepts multipart/form-data with 'images' field, returns array of image URLs
+2. New endpoint: DELETE /api/upload/ticket-images/:filename - deletes an image
+3. Ticket endpoints now accept image URLs (strings) instead of base64 data
+4. Images are served as static files at /uploads/tickets/filename.jpg
+5. Backend still accepts base64 for backward compatibility but converts them to files
+
+**What I need:**
+1. Create an image upload utility that:
+   - Takes File objects and uploads them to /api/upload/ticket-images
+   - Returns array of image URLs
+   - Handles errors properly
+
+2. Update ticket creation form to:
+   - Upload images first using the new endpoint
+   - Then create ticket with image URLs (not base64)
+   - Show upload progress/loading state
+
+3. Update ticket edit form to:
+   - Allow adding new images (upload first, get URLs)
+   - Allow removing existing images (use DELETE endpoint)
+   - Display existing images from URLs
+
+4. Update image display components to:
+   - Use full URLs (prepend API base URL to relative paths)
+   - Handle broken images gracefully
+
+5. Remove all base64 conversion code (FileReader, readAsDataURL, etc.)
+
+6. Update TypeScript types to reflect images as string[] (URLs) not base64 strings
+
+**Key Points:**
+- Images are now small URLs like "/uploads/tickets/image-123.jpg" instead of huge base64 strings
+- Upload images BEFORE creating/updating tickets
+- Full image URL = API_BASE_URL + image path
+- Handle upload errors and show user-friendly messages
+- Support multiple image uploads (up to 10 images)
+
+Please implement these changes across all ticket-related components, forms, and services. Make sure to handle loading states, errors, and provide a smooth user experience.
+
