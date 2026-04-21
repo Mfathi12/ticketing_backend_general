@@ -5,7 +5,7 @@ const { authenticateToken, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
 
-// 3. Add user to company (company owner only) — uses active company from JWT / x-company-id
+// 3. Add user to company — active company from JWT; owner / company admin / manager may invite
 router.post('/add-account', authenticateToken, async (req, res) => {
     try {
         const { name, title, email, password, role } = req.body;
@@ -22,11 +22,14 @@ router.post('/add-account', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: 'name, title and email are required' });
         }
 
-        const ownerMembership = (req.user.companies || []).find(
-            (entry) => entry.company.toString() === companyId && entry.isOwner
-        );
-        if (!ownerMembership) {
-            return res.status(403).json({ message: 'Only company owner can add users' });
+        const m = req.companyMembership;
+        const canInvite =
+            m &&
+            (Boolean(m.isOwner) || ['admin', 'manager'].includes(m.companyRole));
+        if (!canInvite) {
+            return res.status(403).json({
+                message: 'Only company owner, admin or manager can add users to this company'
+            });
         }
 
         const normalizedEmail = email.toLowerCase().trim();
