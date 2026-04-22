@@ -18,6 +18,11 @@ const projectSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User'
     }],
+    company: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Company',
+        index: true
+    },
     status: {
         type: String,
         enum: ['active', 'completed', 'on_hold', 'cancelled'],

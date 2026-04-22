@@ -9,6 +9,13 @@ const router = express.Router();
 router.post('/add-project', authenticateToken, requireRole(['admin', 'manager']), async (req, res) => {
     try {
         const { project_name, start_date, estimated_end_date, assigned_users } = req.body;
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+
+        if (!activeCompanyId) {
+            return res.status(400).json({
+                message: 'Active company required. Log in with a company or switch company first.'
+            });
+        }
 
         if (!project_name || !start_date || !estimated_end_date) {
             return res.status(400).json({ message: 'Project name, start date, and estimated end date are required' });
@@ -21,6 +28,13 @@ router.post('/add-project', authenticateToken, requireRole(['admin', 'manager'])
             if (validUsers.length !== assigned_users.length) {
                 return res.status(400).json({ message: 'Some assigned users are invalid' });
             }
+
+            const allBelongToCompany = validUsers.every((u) =>
+                (u.companies || []).some((entry) => entry.company && entry.company.toString() === activeCompanyId)
+            );
+            if (!allBelongToCompany) {
+                return res.status(400).json({ message: 'Assigned users must belong to the active company' });
+            }
         }
 
         const newProject = new Project({
@@ -28,6 +42,7 @@ router.post('/add-project', authenticateToken, requireRole(['admin', 'manager'])
             start_date: new Date(start_date),
             estimated_end_date: new Date(estimated_end_date),
             assigned_users: assigned_users ,
+            company: activeCompanyId
         });
 
         await newProject.save();
@@ -66,6 +81,13 @@ router.put('/assign-users/:projectId', authenticateToken, requireRole(['admin', 
     try {
         const { projectId } = req.params;
         const { assigned_users } = req.body;
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+
+        if (!activeCompanyId) {
+            return res.status(400).json({
+                message: 'Active company required. Log in with a company or switch company first.'
+            });
+        }
 
         if (!assigned_users || !Array.isArray(assigned_users)) {
             return res.status(400).json({ message: 'Assigned users array is required' });
@@ -75,11 +97,20 @@ router.put('/assign-users/:projectId', authenticateToken, requireRole(['admin', 
         if (!project) {
             return res.status(404).json({ message: 'Project not found' });
         }
+        if (!project.company || project.company.toString() !== activeCompanyId) {
+            return res.status(403).json({ message: 'You can only manage projects in your active company' });
+        }
 
         // Validate assigned users
         const validUsers = await User.find({ _id: { $in: assigned_users } });
         if (validUsers.length !== assigned_users.length) {
             return res.status(400).json({ message: 'Some assigned users are invalid' });
+        }
+        const allBelongToCompany = validUsers.every((u) =>
+            (u.companies || []).some((entry) => entry.company && entry.company.toString() === activeCompanyId)
+        );
+        if (!allBelongToCompany) {
+            return res.status(400).json({ message: 'Assigned users must belong to the active company' });
         }
 
         project.assigned_users = assigned_users;
@@ -114,12 +145,22 @@ router.put('/assign-users/:projectId', authenticateToken, requireRole(['admin', 
 // Response includes totalTickets and openedTickets per project
 router.get('/my-projects', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({
+                message: 'Active company required. Log in with a company or switch company first.'
+            });
+        }
+
         let projects;
 
         if (req.user.role === 'admin' || req.user.role === 'manager') {
-            projects = await Project.find({}).populate('assigned_users', 'name title email role');
+            projects = await Project.find({ company: activeCompanyId }).populate('assigned_users', 'name title email role');
         } else {
-            projects = await Project.find({ assigned_users: req.user._id }).populate('assigned_users', 'name title email role');
+            projects = await Project.find({
+                company: activeCompanyId,
+                assigned_users: req.user._id
+            }).populate('assigned_users', 'name title email role');
         }
 
         const projectIds = projects.map(p => p._id);
@@ -163,10 +204,14 @@ router.get('/my-projects', authenticateToken, async (req, res) => {
 router.get('/:projectId', authenticateToken, async (req, res) => {
     try {
         const { projectId } = req.params;
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
 
         const project = await Project.findById(projectId).populate('assigned_users', 'name title email role');
         if (!project) {
             return res.status(404).json({ message: 'Project not found' });
+        }
+        if (!activeCompanyId || !project.company || project.company.toString() !== activeCompanyId) {
+            return res.status(403).json({ message: 'Access denied to this project' });
         }
 
         // Check if user has access to this project
@@ -186,6 +231,7 @@ router.put('/:projectId/status', authenticateToken, requireRole(['admin', 'manag
     try {
         const { projectId } = req.params;
         const { status } = req.body;
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
 
         if (!status) {
             return res.status(400).json({ message: 'Status is required' });
@@ -194,6 +240,9 @@ router.put('/:projectId/status', authenticateToken, requireRole(['admin', 'manag
         const project = await Project.findById(projectId);
         if (!project) {
             return res.status(404).json({ message: 'Project not found' });
+        }
+        if (!activeCompanyId || !project.company || project.company.toString() !== activeCompanyId) {
+            return res.status(403).json({ message: 'You can only update projects in your active company' });
         }
 
         project.status = status;
