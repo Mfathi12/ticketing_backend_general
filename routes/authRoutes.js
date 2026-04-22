@@ -126,9 +126,14 @@ router.post('/login', async (req, res) => {
             return res.status(400).json({ message: 'Email and password are required' });
         }
 
-        const user = await User.findOne({ email: email.toLowerCase() });
+        const normalizedEmail = String(email).toLowerCase().trim();
+        const user = await User.findOne({ email: normalizedEmail });
         if (!user) {
             return res.status(401).json({ message: 'Invalid credentials' });
+        }
+
+        if (!user.password || typeof user.password !== 'string') {
+            return res.status(401).json({ message: 'This account cannot login with password' });
         }
 
         const isPasswordValid = await bcrypt.compare(password, user.password);
