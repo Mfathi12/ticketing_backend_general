@@ -272,7 +272,7 @@ router.post('/unregister-fcm-token', authenticateToken, async (req, res) => {
     }
 });
 
-// Get users for the active company only (owner or company admin/manager)
+// Get users for the active company only
 router.get('/all-users', authenticateToken, async (req, res) => {
     try {
         if (!req.companyId) {
@@ -283,8 +283,9 @@ router.get('/all-users', authenticateToken, async (req, res) => {
 
         const m = req.companyMembership;
         const canList =
-            m &&
-            (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
+            req.user.role === 'admin' ||
+            req.user.role === 'manager' ||
+            (m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole)));
 
         if (!canList) {
             return res.status(403).json({ message: 'Insufficient permissions to list users for this company' });
