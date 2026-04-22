@@ -14,6 +14,10 @@ const router = express.Router();
 router.post('/add-ticket', authenticateToken, async (req, res) => {
     // await Ticket.deleteMany({ project: "6926e5fadf443653770483c3" });
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const {
             project,
             ticket,
@@ -44,9 +48,9 @@ router.post('/add-ticket', authenticateToken, async (req, res) => {
         }
 
         // Validate project exists
-        const projectExists = await Project.findById(project);
+        const projectExists = await Project.findOne({ _id: project, company: activeCompanyId });
         if (!projectExists) {
-            return res.status(400).json({ message: 'Project not found' });
+            return res.status(400).json({ message: 'Project not found in active company' });
         }
 
         // Convert project to ObjectId for consistent querying
@@ -55,7 +59,7 @@ router.post('/add-ticket', authenticateToken, async (req, res) => {
         // Check if ticket ID already exists in the same project
         const existingTicket = await Ticket.findOne({ 
             ticket: ticket.trim(), 
-        
+            company: activeCompanyId,
             project: projectId 
         });
         
@@ -75,6 +79,7 @@ router.post('/add-ticket', authenticateToken, async (req, res) => {
 
         // Create new ticket
         const newTicket = new Ticket({
+            company: activeCompanyId,
             project: projectId,
             ticket: ticket.trim(),
             cc: normalizedCc,
@@ -316,6 +321,10 @@ router.post('/add-ticket', authenticateToken, async (req, res) => {
 // Edit ticket
 router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { ticketId } = req.params;
         const { 
             project,
@@ -336,7 +345,7 @@ router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
             end_date
         } = req.body;
 
-        const ticket = await Ticket.findById(ticketId);
+        const ticket = await Ticket.findOne({ _id: ticketId, company: activeCompanyId });
         if (!ticket) {
             return res.status(404).json({ message: 'Ticket not found' });
         }
@@ -380,8 +389,8 @@ router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
         const oldHandler = ticket.handler && Array.isArray(ticket.handler) ? ticket.handler.map(h => h.toLowerCase()) : [];
         const oldCc = ticket.cc && Array.isArray(ticket.cc) ? ticket.cc.map(c => c.toLowerCase()) : [];
 
-        const updatedTicket = await Ticket.findByIdAndUpdate(
-            ticketId,
+        const updatedTicket = await Ticket.findOneAndUpdate(
+            { _id: ticketId, company: activeCompanyId },
             updateData,
             { new: true }
         ).populate('project', 'project_name');
@@ -558,6 +567,10 @@ router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
 // Add reply to ticket
 router.post('/ticket/:ticketId/reply', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { ticketId } = req.params;
         const { comment, images } = req.body;
 
@@ -567,7 +580,7 @@ router.post('/ticket/:ticketId/reply', authenticateToken, async (req, res) => {
             });
         }
 
-        const ticket = await Ticket.findById(ticketId);
+        const ticket = await Ticket.findOne({ _id: ticketId, company: activeCompanyId });
         if (!ticket) {
             return res.status(404).json({ message: 'Ticket not found' });
         }
@@ -740,8 +753,12 @@ router.post('/ticket/:ticketId/reply', authenticateToken, async (req, res) => {
 // 9. Get all tickets in assigned projects
 router.get('/my-tickets', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { projectId } = req.query;
-        let query = {};
+        let query = { company: activeCompanyId };
 
         // If projectId is provided, filter by that specific project
         if (projectId) {
@@ -750,12 +767,14 @@ router.get('/my-tickets', authenticateToken, async (req, res) => {
 
         let tickets;
 
-        if (req.user.role === 'admin' || req.user.role === 'manager') {
+        const m = req.companyMembership;
+        const canViewAllCompanyTickets = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
+        if (canViewAllCompanyTickets) {
             // Admin and Manager can view all tickets (optionally filtered by projectId)
             tickets = await Ticket.find(query).populate('project', 'project_name status');
         } else {
             // Regular users can only view tickets from their assigned projects
-            const userProjects = await Project.find({ assigned_users: req.user._id });
+            const userProjects = await Project.find({ assigned_users: req.user._id, company: activeCompanyId });
             const projectIds = userProjects.map(project => project._id);
             
             // If projectId is provided, verify user has access to that project
@@ -787,12 +806,17 @@ router.get('/my-tickets', authenticateToken, async (req, res) => {
 // Get tickets where user is in CC (handler) or sendTo (requested_to_email) and status is not resolved or closed
 router.get('/my-active-tickets', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const userEmail = req.user.email.toLowerCase();
 
         // Find tickets where:
         // 1. User email is in handler array (CC) OR user email equals requested_to_email (sendTo)
         // 2. Status is NOT 'resolved' or 'closed'
         const tickets = await Ticket.find({
+            company: activeCompanyId,
             $and: [
                 {
                     $or: [
@@ -819,9 +843,14 @@ router.get('/my-active-tickets', authenticateToken, async (req, res) => {
 // Get tickets by ticket ID pattern
 router.get('/search/:ticketPattern', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { ticketPattern } = req.params;
 
         const tickets = await Ticket.find({ 
+            company: activeCompanyId,
             ticket: { $regex: ticketPattern, $options: 'i' } 
         });
 
@@ -835,10 +864,14 @@ router.get('/search/:ticketPattern', authenticateToken, async (req, res) => {
 // Get ticket with all comments (old + new replies) - MUST be before /:ticketId route
 router.get('/ticket/:ticketId/comments', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { ticketId } = req.params;
 
         // Find ticket and populate safely (replies might not exist on old tickets)
-        const ticket = await Ticket.findById(ticketId)
+        const ticket = await Ticket.findOne({ _id: ticketId, company: activeCompanyId })
             .populate('project', 'project_name status');
         
         // Only populate replies.userId if replies exist
@@ -910,9 +943,13 @@ router.get('/ticket/:ticketId/comments', authenticateToken, async (req, res) => 
 // Get single ticket
 router.get('/:ticketId', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { ticketId } = req.params;
 
-        const ticket = await Ticket.findById(ticketId);
+        const ticket = await Ticket.findOne({ _id: ticketId, company: activeCompanyId });
         if (!ticket) {
             return res.status(404).json({ message: 'Ticket not found' });
         }
@@ -927,13 +964,20 @@ router.get('/:ticketId', authenticateToken, async (req, res) => {
 // Get tickets by status
 router.get('/filter/status/:status', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { status } = req.params;
         let tickets;
 
-        if (req.user.role === 'admin' || req.user.role === 'manager') {
-            tickets = await Ticket.find({ status });
+        const m = req.companyMembership;
+        const canViewAllCompanyTickets = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
+        if (canViewAllCompanyTickets) {
+            tickets = await Ticket.find({ company: activeCompanyId, status });
         } else {
             tickets = await Ticket.find({ 
+                company: activeCompanyId,
                 status,
                 $or: [
                     { requested_from: req.user.email },
@@ -953,11 +997,17 @@ router.get('/filter/status/:status', authenticateToken, async (req, res) => {
 // Get all tickets (Admin/Manager only)
 router.get('/', authenticateToken, async (req, res) => {
     try {
-        if (req.user.role !== 'admin' && req.user.role !== 'manager') {
-            return res.status(403).json({ message: 'Access denied. Admin or Manager role required' });
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
+        const m = req.companyMembership;
+        const canViewAllCompanyTickets = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
+        if (!canViewAllCompanyTickets) {
+            return res.status(403).json({ message: 'Access denied. Owner/Admin/Manager role required in active company' });
         }
 
-        const tickets = await Ticket.find({});
+        const tickets = await Ticket.find({ company: activeCompanyId });
         res.json({ tickets });
     } catch (error) {
         console.error('Get all tickets error:', error);

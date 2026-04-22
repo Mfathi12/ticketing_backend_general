@@ -36,11 +36,13 @@ function getMonthYearDateRange(month, year) {
     return monthRangeBounds(month, year);
 }
 
-async function getAttendancesForMonth(month, year) {
+async function getAttendancesForMonth(month, year, companyId) {
     const { startDate, endDate } = monthRangeBounds(month, year);
-    return Attendance.find({
+    const query = {
         date: { $gte: startDate, $lt: endDate }
-    })
+    };
+    if (companyId) query.company = companyId;
+    return Attendance.find(query)
         .populate('user', 'name email title role')
         .sort({ date: 1, checkIn: 1 });
 }
@@ -136,8 +138,8 @@ function buildSpreadsheetMlBuffer(rows) {
     return Buffer.from(`\uFEFF${xml}`, 'utf8');
 }
 
-const generateMonthlyReport = async (month, year) => {
-    const attendances = await getAttendancesForMonth(month, year);
+const generateMonthlyReport = async (month, year, companyId) => {
+    const attendances = await getAttendancesForMonth(month, year, companyId);
     const rows = attendances.map(rowToPlain);
 
     const fields = [
@@ -159,8 +161,8 @@ const generateMonthlyReport = async (month, year) => {
     return json2csvParser.parse(rows);
 };
 
-const generateMonthlyReportXlsx = async (month, year) => {
-    const attendances = await getAttendancesForMonth(month, year);
+const generateMonthlyReportXlsx = async (month, year, companyId) => {
+    const attendances = await getAttendancesForMonth(month, year, companyId);
     const rows = attendances.map(rowToPlain);
     return buildSpreadsheetMlBuffer(rows);
 };

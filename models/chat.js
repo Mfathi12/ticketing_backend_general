@@ -1,6 +1,11 @@
 const mongoose = require('mongoose');
 
 const messageSchema = new mongoose.Schema({
+    company: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Company',
+        index: true
+    },
     conversation: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Conversation',
@@ -115,6 +120,11 @@ messageSchema.index({ sender: 1 });
 messageSchema.index({ parentMessage: 1 }); // Index for thread queries
 
 const conversationSchema = new mongoose.Schema({
+    company: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Company',
+        index: true
+    },
     participants: [{
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',

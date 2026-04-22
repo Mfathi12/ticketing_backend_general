@@ -8,9 +8,10 @@ const { sendNotificationToUser } = require('./fcmService');
  * @returns {Promise<import('../models/notification')>}
  */
 const createNotification = async (userId, payload) => {
-    const { type, title, body = '', data = {} } = payload;
+    const { type, title, body = '', data = {}, company = null } = payload;
 
     const doc = new Notification({
+        ...(company ? { company } : {}),
         user: userId,
         type,
         title,

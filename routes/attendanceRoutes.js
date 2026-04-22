@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Attendance = require('../models/attendance');
-const { authenticateToken, requireRole } = require('../middleware/auth');
+const { authenticateToken } = require('../middleware/auth');
 const {
     generateMonthlyReport,
     generateMonthlyReportXlsx,
@@ -20,10 +20,15 @@ const openSessionFilter = {
 router.post('/check-in', authenticateToken, async (req, res) => {
     try {
         const userId = req.user._id;
-        await rolloverStaleOpenSessionsForUser(userId);
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
+        await rolloverStaleOpenSessionsForUser(userId, activeCompanyId);
         const date = getAttendanceTodayString();
 
         const openAny = await Attendance.findOne({
+            company: activeCompanyId,
             user: userId,
             ...openSessionFilter
         });
@@ -36,6 +41,7 @@ router.post('/check-in', authenticateToken, async (req, res) => {
         }
 
         const attendance = new Attendance({
+            company: activeCompanyId,
             user: userId,
             date,
             checkIn: new Date(),
@@ -58,9 +64,14 @@ router.post('/check-in', authenticateToken, async (req, res) => {
 router.post('/check-out', authenticateToken, async (req, res) => {
     try {
         const userId = req.user._id;
-        await rolloverStaleOpenSessionsForUser(userId);
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
+        await rolloverStaleOpenSessionsForUser(userId, activeCompanyId);
 
         const attendance = await Attendance.findOne({
+            company: activeCompanyId,
             user: userId,
             ...openSessionFilter
         }).sort({ checkIn: -1 });
@@ -95,11 +106,15 @@ router.post('/check-out', authenticateToken, async (req, res) => {
 router.get('/my-attendance', authenticateToken, async (req, res) => {
     try {
         const userId = req.user._id;
-        await rolloverStaleOpenSessionsForUser(userId);
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
+        await rolloverStaleOpenSessionsForUser(userId, activeCompanyId);
         // Optional: Pagination or limit
         const limit = parseInt(req.query.limit) || 30; // Default last 30 entries
 
-        const logs = await Attendance.find({ user: userId })
+        const logs = await Attendance.find({ company: activeCompanyId, user: userId })
             .sort({ date: -1, checkIn: -1 }) // Newest day first; multiple sessions same day by latest check-in
             .limit(limit);
 
@@ -114,13 +129,21 @@ router.get('/my-attendance', authenticateToken, async (req, res) => {
 router.put(
     '/admin/record/:attendanceId',
     authenticateToken,
-    requireRole(['admin', 'manager']),
     async (req, res) => {
         try {
             const { attendanceId } = req.params;
             const { checkIn, checkOut, status, note } = req.body;
+            const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+            if (!activeCompanyId) {
+                return res.status(400).json({ message: 'Active company required' });
+            }
+            const m = req.companyMembership;
+            const canEdit = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
+            if (!canEdit) {
+                return res.status(403).json({ message: 'Insufficient permissions' });
+            }
 
-            const attendance = await Attendance.findById(attendanceId);
+            const attendance = await Attendance.findOne({ _id: attendanceId, company: activeCompanyId });
             if (!attendance) {
                 return res.status(404).json({ message: 'Attendance record not found' });
             }
@@ -201,6 +224,7 @@ router.put(
             if (employeeId && employeeId.toString() !== req.user._id.toString()) {
                 try {
                     await createNotification(employeeId, {
+                        company: activeCompanyId,
                         type: 'attendance_admin_edit',
                         title: 'Attendance updated',
                         body: `Your attendance for ${attendance.date} was updated by ${editorName}.`,
@@ -232,10 +256,19 @@ router.put(
 // GET /all-attendance (Admin & Manager Only)
 // Optional: month + year (1–12, YYYY) filters `date` to that calendar month (same logic as report export).
 // Optional: date=YYYY-MM-DD for a single day (ignored if month+year are sent).
-router.get('/all-attendance', authenticateToken, requireRole(['admin', 'manager']), async (req, res) => {
+router.get('/all-attendance', authenticateToken, async (req, res) => {
     try {
         const { date, user, month, year } = req.query;
-        let query = {};
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
+        const m = req.companyMembership;
+        const canReadAll = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
+        if (!canReadAll) {
+            return res.status(403).json({ message: 'Insufficient permissions' });
+        }
+        let query = { company: activeCompanyId };
 
         const hasMonth = month !== undefined && month !== null && String(month).trim() !== '';
         const hasYear = year !== undefined && year !== null && String(year).trim() !== '';
@@ -287,8 +320,17 @@ router.get('/all-attendance', authenticateToken, requireRole(['admin', 'manager'
 });
 
 // GET /admin/report (Admin & Manager Only) — format=xlsx (default) or format=csv
-router.get('/admin/report', authenticateToken, requireRole(['admin', 'manager']), async (req, res) => {
+router.get('/admin/report', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
+        const m = req.companyMembership;
+        const canReadAll = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
+        if (!canReadAll) {
+            return res.status(403).json({ message: 'Insufficient permissions' });
+        }
         const { month, year } = req.query;
         const format = String(req.query.format || 'xlsx').toLowerCase();
 
@@ -305,7 +347,7 @@ router.get('/admin/report', authenticateToken, requireRole(['admin', 'manager'])
         }
 
         if (format === 'csv') {
-            const csv = await generateMonthlyReport(month, year);
+            const csv = await generateMonthlyReport(month, year, activeCompanyId);
             res.header('Content-Type', 'text/csv; charset=utf-8');
             res.attachment(`attendance_report_${year}_${monthPadded}.csv`);
             res.send(csv);
@@ -317,7 +359,7 @@ router.get('/admin/report', authenticateToken, requireRole(['admin', 'manager'])
         }
 
         // SpreadsheetML (Excel 2003 XML) — opens in Excel; .xls extension
-        const buffer = await generateMonthlyReportXlsx(month, year);
+        const buffer = await generateMonthlyReportXlsx(month, year, activeCompanyId);
         res.header('Content-Type', 'application/vnd.ms-excel; charset=utf-8');
         res.attachment(`attendance_report_${year}_${monthPadded}.xls`);
         res.send(buffer);

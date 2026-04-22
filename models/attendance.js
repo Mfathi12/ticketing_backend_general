@@ -1,6 +1,11 @@
 const mongoose = require('mongoose');
 
 const attendanceSchema = new mongoose.Schema({
+    company: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Company',
+        index: true
+    },
     user: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
@@ -46,6 +51,6 @@ const attendanceSchema = new mongoose.Schema({
 });
 
 // Compound index for queries by user and calendar day (multiple sessions per day allowed)
-attendanceSchema.index({ user: 1, date: 1 });
+attendanceSchema.index({ company: 1, user: 1, date: 1 });
 
 module.exports = mongoose.model('Attendance', attendanceSchema);

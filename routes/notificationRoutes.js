@@ -12,11 +12,15 @@ const router = express.Router();
 router.get('/', authenticateToken, async (req, res) => {
     try {
         const userId = req.user._id;
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const page = Math.max(1, parseInt(req.query.page) || 1);
         const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
         const unreadOnly = req.query.unreadOnly === 'true';
 
-        const query = { user: userId };
+        const query = { user: userId, company: activeCompanyId };
         if (unreadOnly) query.read = false;
 
         const [notifications, total] = await Promise.all([
@@ -28,7 +32,7 @@ router.get('/', authenticateToken, async (req, res) => {
             Notification.countDocuments(query)
         ]);
 
-        const unreadCount = await Notification.countDocuments({ user: userId, read: false });
+        const unreadCount = await Notification.countDocuments({ user: userId, company: activeCompanyId, read: false });
 
         res.json({
             notifications,
@@ -54,11 +58,15 @@ router.get('/', authenticateToken, async (req, res) => {
 router.patch('/read', authenticateToken, async (req, res) => {
     try {
         const userId = req.user._id;
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { ids, all } = req.body;
 
         if (all === true) {
             const result = await Notification.updateMany(
-                { user: userId, read: false },
+                { user: userId, company: activeCompanyId, read: false },
                 { read: true, readAt: new Date() }
             );
             return res.json({
@@ -69,7 +77,7 @@ router.patch('/read', authenticateToken, async (req, res) => {
 
         if (ids && Array.isArray(ids) && ids.length > 0) {
             const result = await Notification.updateMany(
-                { _id: { $in: ids }, user: userId },
+                { _id: { $in: ids }, user: userId, company: activeCompanyId },
                 { read: true, readAt: new Date() }
             );
             return res.json({
@@ -95,9 +103,13 @@ router.patch('/:id/read', authenticateToken, async (req, res) => {
     try {
         const { id } = req.params;
         const userId = req.user._id;
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
 
         const notification = await Notification.findOneAndUpdate(
-            { _id: id, user: userId },
+            { _id: id, user: userId, company: activeCompanyId },
             { read: true, readAt: new Date() },
             { new: true }
         );
@@ -119,8 +131,13 @@ router.patch('/:id/read', authenticateToken, async (req, res) => {
  */
 router.get('/unread-count', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const count = await Notification.countDocuments({
             user: req.user._id,
+            company: activeCompanyId,
             read: false
         });
         res.json({ unreadCount: count });

@@ -3,6 +3,14 @@ const { User } = require('../models');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 
+const membershipCompanyId = (entry) => {
+    if (!entry) return null;
+    const raw = entry.companyId ?? entry.company;
+    if (!raw) return null;
+    if (typeof raw === 'object' && raw._id) return String(raw._id);
+    return String(raw);
+};
+
 /**
  * Resolves active company from JWT `companyId` (preferred) or `x-company-id` header.
  * Validates membership on the loaded user. Sets req.companyId / req.companyMembership or null.
@@ -24,14 +32,14 @@ const resolveActiveCompany = (req, user, decoded) => {
     }
 
     const membership = (user.companies || []).find(
-        (entry) => entry.company && entry.company.toString() === candidate
+        (entry) => membershipCompanyId(entry) === candidate
     );
 
     if (!membership) {
         return { error: { status: 403, message: 'You are not a member of this company' } };
     }
 
-    req.companyId = membership.company;
+    req.companyId = membershipCompanyId(membership);
     req.companyMembership = membership;
     return null;
 };

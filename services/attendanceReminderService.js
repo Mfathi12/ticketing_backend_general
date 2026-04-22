@@ -29,19 +29,20 @@ const processMidnightAttendanceRollover = async () => {
         });
 
         for (const userId of usersWithStaleOpen) {
-            await rolloverUserUntilToday(userId, todayStr, openNoCheckout);
+            await rolloverUserUntilToday(userId, null, todayStr, openNoCheckout);
         }
     } catch (error) {
         console.error('Error in processMidnightAttendanceRollover:', error);
     }
 };
 
-async function rolloverUserUntilToday(userId, todayStr, openNoCheckout) {
+async function rolloverUserUntilToday(userId, companyId, todayStr, openNoCheckout) {
     const AUTO_NOTE = 'Auto: session rolled over at midnight';
 
     for (let i = 0; i < 400; i++) {
         const open = await Attendance.findOne({
             user: userId,
+            ...(companyId ? { company: companyId } : {}),
             ...openNoCheckout
         });
 
@@ -69,6 +70,7 @@ async function rolloverUserUntilToday(userId, todayStr, openNoCheckout) {
         const hoursStr = (durationMins / 60).toFixed(1);
         try {
             await createNotification(userId, {
+                company: open.company,
                 type: 'attendance_day_rollover',
                 title: `Attendance closed: ${closedDate}`,
                 body: `Your day was closed automatically at midnight. Recorded time: ${hoursStr} h (${durationMins} min).`,
@@ -85,11 +87,16 @@ async function rolloverUserUntilToday(userId, todayStr, openNoCheckout) {
         const nextDateStr = addOneCalendarDay(open.date);
         if (nextDateStr > todayStr) return;
 
-        const existingNext = await Attendance.findOne({ user: userId, date: nextDateStr });
+        const existingNext = await Attendance.findOne({
+            user: userId,
+            ...(companyId ? { company: companyId } : {}),
+            date: nextDateStr
+        });
         if (existingNext) return;
 
         const anchor = open.continuousCheckIn || open.checkIn;
         const newAtt = await Attendance.create({
+            ...(companyId ? { company: companyId } : {}),
             user: userId,
             date: nextDateStr,
             checkIn: startOfAttendanceDay(nextDateStr),
@@ -100,6 +107,7 @@ async function rolloverUserUntilToday(userId, todayStr, openNoCheckout) {
 
         try {
             await createNotification(userId, {
+                company: newAtt.company,
                 type: 'attendance_day_rollover',
                 title: `New attendance day: ${nextDateStr}`,
                 body: 'A new day started and you were checked in automatically (session continued).',
@@ -152,6 +160,7 @@ const sendEightHourCheckoutReminders = async () => {
 
             try {
                 await createNotification(user._id, {
+                    company: attendance.company,
                     type: 'attendance_reminder',
                     title: 'Attendance reminder',
                     body: 'You have been checked in for more than 8 hours. Please remember to check out.',
@@ -173,12 +182,12 @@ const sendEightHourCheckoutReminders = async () => {
 };
 
 /** Run midnight split for one user (cheap; call from check-in / check-out / my-attendance). */
-async function rolloverStaleOpenSessionsForUser(userId) {
+async function rolloverStaleOpenSessionsForUser(userId, companyId = null) {
     const todayStr = getAttendanceTodayString();
     const openNoCheckout = {
         $or: [{ checkOut: { $exists: false } }, { checkOut: null }]
     };
-    await rolloverUserUntilToday(userId, todayStr, openNoCheckout);
+    await rolloverUserUntilToday(userId, companyId, todayStr, openNoCheckout);
 }
 
 module.exports = {

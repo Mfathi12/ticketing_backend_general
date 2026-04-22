@@ -90,6 +90,10 @@ const upload = multer({
 // Get or create conversation between two users
 router.post('/conversation', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { participantId } = req.body;
 
         if (!participantId) {
@@ -105,9 +109,16 @@ router.post('/conversation', authenticateToken, async (req, res) => {
         if (!participant) {
             return res.status(404).json({ message: 'Participant not found' });
         }
+        const participantInCompany = (participant.companies || []).some(
+            (m) => m.company && m.company.toString() === activeCompanyId
+        );
+        if (!participantInCompany) {
+            return res.status(403).json({ message: 'Participant is not in active company' });
+        }
 
         // Find existing conversation
         let conversation = await Conversation.findOne({
+            company: activeCompanyId,
             isGroup: false,
             participants: { $all: [req.user._id, participantId] }
         }).populate('participants', 'name email title role');
@@ -115,6 +126,7 @@ router.post('/conversation', authenticateToken, async (req, res) => {
         // Create new conversation if doesn't exist
         if (!conversation) {
             conversation = new Conversation({
+                company: activeCompanyId,
                 participants: [req.user._id, participantId],
                 isGroup: false
             });
@@ -133,9 +145,13 @@ router.post('/conversation', authenticateToken, async (req, res) => {
 router.get('/project/:projectId', authenticateToken, async (req, res) => {
     try {
         const { projectId } = req.params;
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
 
         // Verify project exists
-        const project = await Project.findById(projectId).populate('assigned_users', 'name email title role');
+        const project = await Project.findOne({ _id: projectId, company: activeCompanyId }).populate('assigned_users', 'name email title role');
         if (!project) {
             return res.status(404).json({ message: 'Project not found' });
         }
@@ -154,6 +170,7 @@ router.get('/project/:projectId', authenticateToken, async (req, res) => {
 
         // Find or create project conversation
         let conversation = await Conversation.findOne({ project: projectId })
+            .where({ company: activeCompanyId })
             .populate('participants', 'name email title role')
             .populate('lastMessage')
             .populate('project', 'project_name');
@@ -161,6 +178,7 @@ router.get('/project/:projectId', authenticateToken, async (req, res) => {
         if (!conversation) {
             // Create new project conversation
             conversation = new Conversation({
+                company: activeCompanyId,
                 participants: project.assigned_users.map(u => u._id),
                 isGroup: true,
                 groupName: project.project_name,
@@ -197,8 +215,13 @@ router.get('/project/:projectId', authenticateToken, async (req, res) => {
 // Get all users for starting a new conversation - MUST be before parameterized routes
 router.get('/users', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const users = await User.find({
-            _id: { $ne: req.user._id }
+            _id: { $ne: req.user._id },
+            'companies.company': activeCompanyId
         }).select('name email title role').sort({ name: 1 });
 
         res.json({ users });
@@ -211,18 +234,24 @@ router.get('/users', authenticateToken, async (req, res) => {
 // Get all conversations for the logged-in user
 router.get('/conversations', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         // First, ensure all projects the user is assigned to have conversations
         const userProjects = await Project.find({
-            assigned_users: req.user._id
+            assigned_users: req.user._id,
+            company: activeCompanyId
         }).populate('assigned_users');
 
         for (const project of userProjects) {
-            let conversation = await Conversation.findOne({ project: project._id });
+            let conversation = await Conversation.findOne({ project: project._id, company: activeCompanyId });
 
             if (!conversation) {
                 // Create missing project conversation
                 try {
                     conversation = new Conversation({
+                        company: activeCompanyId,
                         participants: project.assigned_users.map(u => u._id),
                         isGroup: true,
                         groupName: project.project_name,
@@ -262,6 +291,7 @@ router.get('/conversations', authenticateToken, async (req, res) => {
 
         // Now get all conversations for the user
         const conversations = await Conversation.find({
+            company: activeCompanyId,
             participants: req.user._id
         })
             .populate('participants', 'name email title role')
@@ -288,11 +318,15 @@ router.get('/conversations', authenticateToken, async (req, res) => {
 // Get messages for a conversation
 router.get('/conversation/:conversationId/messages', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { conversationId } = req.params;
         const { page = 1, limit = 50 } = req.query;
 
         // Verify user is part of the conversation
-        const conversation = await Conversation.findById(conversationId);
+        const conversation = await Conversation.findOne({ _id: conversationId, company: activeCompanyId });
         if (!conversation) {
             return res.status(404).json({ message: 'Conversation not found' });
         }
@@ -303,6 +337,7 @@ router.get('/conversation/:conversationId/messages', authenticateToken, async (r
 
         // Get messages
         const messages = await Message.find({
+            company: activeCompanyId,
             conversation: conversationId,
             isDeleted: false
         })
@@ -316,6 +351,7 @@ router.get('/conversation/:conversationId/messages', authenticateToken, async (r
         // Mark messages as read
         await Message.updateMany(
             {
+                company: activeCompanyId,
                 conversation: conversationId,
                 sender: { $ne: req.user._id },
                 'readBy.user': { $ne: req.user._id }
@@ -347,6 +383,10 @@ router.get('/conversation/:conversationId/messages', authenticateToken, async (r
 // Send text message
 router.post('/message', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { conversationId, content, replyTo, mentions } = req.body;
 
         if (!conversationId || !content || !content.trim()) {
@@ -354,7 +394,7 @@ router.post('/message', authenticateToken, async (req, res) => {
         }
 
         // Verify user is part of the conversation
-        const conversation = await Conversation.findById(conversationId);
+        const conversation = await Conversation.findOne({ _id: conversationId, company: activeCompanyId });
         if (!conversation) {
             return res.status(404).json({ message: 'Conversation not found' });
         }
@@ -365,6 +405,7 @@ router.post('/message', authenticateToken, async (req, res) => {
 
         // Create message
         const message = new Message({
+            company: activeCompanyId,
             conversation: conversationId,
             sender: req.user._id,
             senderName: req.user.name || req.user.email,
@@ -420,6 +461,7 @@ router.post('/message', authenticateToken, async (req, res) => {
                 if (!participantUser) continue;
 
                 await createNotification(participantUser._id, {
+                    company: activeCompanyId,
                     type: 'chat_message',
                     title: `New message from ${senderName}`,
                     body: textPreview || 'New chat message',
@@ -440,6 +482,10 @@ router.post('/message', authenticateToken, async (req, res) => {
 // Edit message
 router.put('/message/:messageId', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { messageId } = req.params;
         const { content } = req.body;
 
@@ -447,7 +493,7 @@ router.put('/message/:messageId', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: 'Content is required' });
         }
 
-        const message = await Message.findById(messageId);
+        const message = await Message.findOne({ _id: messageId, company: activeCompanyId });
         if (!message) {
             return res.status(404).json({ message: 'Message not found' });
         }
@@ -471,7 +517,7 @@ router.put('/message/:messageId', authenticateToken, async (req, res) => {
 
         // Emit socket event
         const messageObj = message.toObject ? message.toObject() : message;
-        const conversation = await Conversation.findById(message.conversation);
+        const conversation = await Conversation.findOne({ _id: message.conversation, company: activeCompanyId });
         const io = req.app.get('io');
         if (io && conversation) {
             conversation.participants.forEach(participantId => {
@@ -493,9 +539,13 @@ router.put('/message/:messageId', authenticateToken, async (req, res) => {
 // Delete message
 router.delete('/message/:messageId', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { messageId } = req.params;
 
-        const message = await Message.findById(messageId);
+        const message = await Message.findOne({ _id: messageId, company: activeCompanyId });
         if (!message) {
             return res.status(404).json({ message: 'Message not found' });
         }
@@ -509,7 +559,7 @@ router.delete('/message/:messageId', authenticateToken, async (req, res) => {
         await message.save();
 
         // Emit socket event
-        const conversation = await Conversation.findById(message.conversation);
+        const conversation = await Conversation.findOne({ _id: message.conversation, company: activeCompanyId });
         const io = req.app.get('io');
         if (io && conversation) {
             conversation.participants.forEach(participantId => {
@@ -531,6 +581,10 @@ router.delete('/message/:messageId', authenticateToken, async (req, res) => {
 // Add/Remove Reaction
 router.post('/message/:messageId/reaction', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { messageId } = req.params;
         const { emoji } = req.body;
 
@@ -538,7 +592,7 @@ router.post('/message/:messageId/reaction', authenticateToken, async (req, res) 
             return res.status(400).json({ message: 'Emoji is required' });
         }
 
-        const message = await Message.findById(messageId);
+        const message = await Message.findOne({ _id: messageId, company: activeCompanyId });
         if (!message) {
             return res.status(404).json({ message: 'Message not found' });
         }
@@ -564,7 +618,7 @@ router.post('/message/:messageId/reaction', authenticateToken, async (req, res) 
         await message.populate('reactions.user', 'name email');
 
         // Emit socket event
-        const conversation = await Conversation.findById(message.conversation);
+        const conversation = await Conversation.findOne({ _id: message.conversation, company: activeCompanyId });
         const io = req.app.get('io');
         if (io && conversation) {
             conversation.participants.forEach(participantId => {
@@ -590,17 +644,21 @@ router.post('/message/:messageId/reaction', authenticateToken, async (req, res) 
 // Create thread reply
 router.post('/message/:messageId/thread', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { messageId } = req.params;
         const { content, type = 'text', fileUrl, fileName, fileSize, mimeType } = req.body;
 
         // Validate parent message exists
-        const parentMessage = await Message.findById(messageId);
+        const parentMessage = await Message.findOne({ _id: messageId, company: activeCompanyId });
         if (!parentMessage) {
             return res.status(404).json({ message: 'Parent message not found' });
         }
 
         // Verify user is part of the conversation
-        const conversation = await Conversation.findById(parentMessage.conversation);
+        const conversation = await Conversation.findOne({ _id: parentMessage.conversation, company: activeCompanyId });
         if (!conversation) {
             return res.status(404).json({ message: 'Conversation not found' });
         }
@@ -611,6 +669,7 @@ router.post('/message/:messageId/thread', authenticateToken, async (req, res) =>
 
         // Create thread reply
         const threadReply = new Message({
+            company: activeCompanyId,
             conversation: parentMessage.conversation,
             sender: req.user._id,
             senderName: req.user.name || req.user.email,
@@ -659,10 +718,14 @@ router.post('/message/:messageId/thread', authenticateToken, async (req, res) =>
 // Get thread replies
 router.get('/message/:messageId/thread', authenticateToken, async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { messageId } = req.params;
 
         // Validate parent message exists
-        const parentMessage = await Message.findById(messageId)
+        const parentMessage = await Message.findOne({ _id: messageId, company: activeCompanyId })
             .populate('sender', 'name email title role')
             .populate('replyTo')
             .populate('mentions', 'name email');
@@ -672,7 +735,7 @@ router.get('/message/:messageId/thread', authenticateToken, async (req, res) => 
         }
 
         // Verify user is part of the conversation
-        const conversation = await Conversation.findById(parentMessage.conversation);
+        const conversation = await Conversation.findOne({ _id: parentMessage.conversation, company: activeCompanyId });
         if (!conversation) {
             return res.status(404).json({ message: 'Conversation not found' });
         }
@@ -683,6 +746,7 @@ router.get('/message/:messageId/thread', authenticateToken, async (req, res) => 
 
         // Fetch all thread replies
         const threadReplies = await Message.find({
+            company: activeCompanyId,
             parentMessage: messageId,
             isDeleted: false
         })
@@ -707,6 +771,10 @@ router.get('/message/:messageId/thread', authenticateToken, async (req, res) => 
 // Use upload.any() to accept files with different fieldnames (voice, image, video, file)
 router.post('/message/file', authenticateToken, upload.any(), async (req, res) => {
     try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
         const { conversationId } = req.body;
         const file = req.files && req.files[0]; // Get first file from array
 
@@ -723,7 +791,7 @@ router.post('/message/file', authenticateToken, upload.any(), async (req, res) =
         }
 
         // Verify user is part of the conversation
-        const conversation = await Conversation.findById(conversationId);
+        const conversation = await Conversation.findOne({ _id: conversationId, company: activeCompanyId });
         if (!conversation) {
             return res.status(404).json({ message: 'Conversation not found' });
         }
@@ -737,6 +805,7 @@ router.post('/message/file', authenticateToken, upload.any(), async (req, res) =
 
         // Create message
         const message = new Message({
+            company: activeCompanyId,
             conversation: conversationId,
             sender: req.user._id,
             senderName: req.user.name || req.user.email,
@@ -816,6 +885,7 @@ router.post('/message/file', authenticateToken, upload.any(), async (req, res) =
                 if (!participantUser) continue;
 
                 await createNotification(participantUser._id, {
+                    company: activeCompanyId,
                     type: 'chat_message',
                     title: `New ${fileLabel} from ${senderName}`,
                     body: file.originalname || fileLabel,
@@ -836,22 +906,28 @@ router.post('/message/file', authenticateToken, upload.any(), async (req, res) =
 // Admin endpoint to create missing project conversations
 router.post('/admin/create-project-conversations', authenticateToken, async (req, res) => {
     try {
-        // Only admin can access this
-        if (req.user.role !== 'admin' && req.user.role !== 'manager') {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
+        const m = req.companyMembership;
+        const canManage = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
+        if (!canManage) {
             return res.status(403).json({ message: 'Access denied' });
         }
 
-        const projects = await Project.find({}).populate('assigned_users');
+        const projects = await Project.find({ company: activeCompanyId }).populate('assigned_users');
         let created = 0;
         let updated = 0;
         let existing = 0;
 
         for (const project of projects) {
-            let conversation = await Conversation.findOne({ project: project._id });
+            let conversation = await Conversation.findOne({ company: activeCompanyId, project: project._id });
 
             if (!conversation) {
                 // Create new conversation
                 conversation = new Conversation({
+                    company: activeCompanyId,
                     participants: project.assigned_users.map(u => u._id),
                     isGroup: true,
                     groupName: project.project_name,

@@ -1,12 +1,12 @@
 const express = require('express');
 const { Project, User, Ticket } = require('../models');
 const { Conversation } = require('../models/chat');
-const { authenticateToken, requireRole } = require('../middleware/auth');
+const { authenticateToken } = require('../middleware/auth');
 
 const router = express.Router();
 
 // 5. Add new project (Admin/Manager only)
-router.post('/add-project', authenticateToken, requireRole(['admin', 'manager']), async (req, res) => {
+router.post('/add-project', authenticateToken, async (req, res) => {
     try {
         const { project_name, start_date, estimated_end_date, assigned_users } = req.body;
         const activeCompanyId = req.companyId ? req.companyId.toString() : null;
@@ -15,6 +15,11 @@ router.post('/add-project', authenticateToken, requireRole(['admin', 'manager'])
             return res.status(400).json({
                 message: 'Active company required. Log in with a company or switch company first.'
             });
+        }
+        const m = req.companyMembership;
+        const canManageProjects = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
+        if (!canManageProjects) {
+            return res.status(403).json({ message: 'Insufficient permissions' });
         }
 
         if (!project_name || !start_date || !estimated_end_date) {
@@ -50,6 +55,7 @@ router.post('/add-project', authenticateToken, requireRole(['admin', 'manager'])
         // Create project conversation group
         try {
             const projectConversation = new Conversation({
+                company: activeCompanyId,
                 participants: assigned_users || [],
                 isGroup: true,
                 groupName: project_name,
@@ -77,7 +83,7 @@ router.post('/add-project', authenticateToken, requireRole(['admin', 'manager'])
 });
 
 // Assign users to project (Admin/Manager only)
-router.put('/assign-users/:projectId', authenticateToken, requireRole(['admin', 'manager']), async (req, res) => {
+router.put('/assign-users/:projectId', authenticateToken, async (req, res) => {
     try {
         const { projectId } = req.params;
         const { assigned_users } = req.body;
@@ -87,6 +93,11 @@ router.put('/assign-users/:projectId', authenticateToken, requireRole(['admin', 
             return res.status(400).json({
                 message: 'Active company required. Log in with a company or switch company first.'
             });
+        }
+        const m = req.companyMembership;
+        const canManageProjects = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
+        if (!canManageProjects) {
+            return res.status(403).json({ message: 'Insufficient permissions' });
         }
 
         if (!assigned_users || !Array.isArray(assigned_users)) {
@@ -118,7 +129,7 @@ router.put('/assign-users/:projectId', authenticateToken, requireRole(['admin', 
 
         // Update project conversation participants
         try {
-            const projectConversation = await Conversation.findOne({ project: projectId });
+            const projectConversation = await Conversation.findOne({ company: activeCompanyId, project: projectId });
             if (projectConversation) {
                 projectConversation.participants = assigned_users;
                 await projectConversation.save();
@@ -154,7 +165,9 @@ router.get('/my-projects', authenticateToken, async (req, res) => {
 
         let projects;
 
-        if (req.user.role === 'admin' || req.user.role === 'manager') {
+        const m = req.companyMembership;
+        const canViewAllCompanyProjects = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
+        if (canViewAllCompanyProjects) {
             projects = await Project.find({ company: activeCompanyId }).populate('assigned_users', 'name title email role');
         } else {
             projects = await Project.find({
@@ -167,7 +180,7 @@ router.get('/my-projects', authenticateToken, async (req, res) => {
 
         // Aggregate total and opened (open + in_progress) ticket counts per project
         const ticketCounts = await Ticket.aggregate([
-            { $match: { project: { $in: projectIds } } },
+            { $match: { company: req.companyId, project: { $in: projectIds } } },
             {
                 $group: {
                     _id: '$project',
@@ -227,11 +240,16 @@ router.get('/:projectId', authenticateToken, async (req, res) => {
 });
 
 // Update project status (Admin/Manager only)
-router.put('/:projectId/status', authenticateToken, requireRole(['admin', 'manager']), async (req, res) => {
+router.put('/:projectId/status', authenticateToken, async (req, res) => {
     try {
         const { projectId } = req.params;
         const { status } = req.body;
         const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        const m = req.companyMembership;
+        const canManageProjects = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
+        if (!canManageProjects) {
+            return res.status(403).json({ message: 'Insufficient permissions' });
+        }
 
         if (!status) {
             return res.status(400).json({ message: 'Status is required' });
