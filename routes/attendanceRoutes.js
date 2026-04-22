@@ -24,7 +24,6 @@ router.post('/check-in', authenticateToken, async (req, res) => {
         if (!activeCompanyId) {
             return res.status(400).json({ message: 'Active company required' });
         }
-        
         await rolloverStaleOpenSessionsForUser(userId, activeCompanyId);
         const date = getAttendanceTodayString();
 
