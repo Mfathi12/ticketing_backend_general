@@ -16,6 +16,7 @@ const openSessionFilter = {
     $or: [{ checkOut: { $exists: false } }, { checkOut: null }]
 };
 
+
 // POST /check-in
 router.post('/check-in', authenticateToken, async (req, res) => {
     try {
