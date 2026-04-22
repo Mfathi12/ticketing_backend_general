@@ -43,9 +43,16 @@ router.post('/register-company', async (req, res) => {
         let ownerUser = await User.findOne({ email: normalizedEmail });
 
         if (ownerUser) {
+            if (!ownerUser.password || typeof ownerUser.password !== 'string') {
+                return res.status(400).json({
+                    message: 'Existing account has no password. Please reset password first, then create company.'
+                });
+            }
             const isPasswordValid = await bcrypt.compare(password, ownerUser.password);
             if (!isPasswordValid) {
-                return res.status(401).json({ message: 'Invalid credentials for existing user' });
+                return res.status(401).json({
+                    message: 'Invalid credentials for existing user. Use your current account password to add another company.'
+                });
             }
         } else {
             const hashedPassword = await bcrypt.hash(password, 12);
@@ -58,7 +65,7 @@ router.post('/register-company', async (req, res) => {
             });
         }
 
-        const company = await Company.create({
+        const createCompanyPayload = {
             name: companyName.trim(),
             email: normalizedEmail,
             ownerUser: ownerUser._id,
@@ -67,8 +74,33 @@ router.post('/register-company', async (req, res) => {
                 role: 'owner',
                 isOwner: true
             }]
-        });
+        };
 
+        let company;
+        try {
+            company = await Company.create(createCompanyPayload);
+        } catch (createErr) {
+            const isDuplicateEmailIndex =
+                createErr?.code === 11000 &&
+                (createErr?.keyPattern?.email || String(createErr?.message || '').includes('email_1'));
+
+            if (!isDuplicateEmailIndex) {
+                throw createErr;
+            }
+
+            // Backward-compatibility: old DB may still have unique index on email.
+            try {
+                await Company.collection.dropIndex('email_1');
+            } catch (dropErr) {
+                console.error('Could not drop legacy email_1 index on Company:', dropErr.message);
+            }
+
+            company = await Company.create(createCompanyPayload);
+        }
+
+        if (!Array.isArray(ownerUser.companies)) {
+            ownerUser.companies = [];
+        }
         const alreadyMember = ownerUser.companies?.some(
             (entry) => entry.company?.toString() === company._id.toString()
         );
