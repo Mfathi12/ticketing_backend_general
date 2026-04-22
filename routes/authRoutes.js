@@ -1,6 +1,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const mongoose = require('mongoose');
 const { User, Company } = require('../models');
 const { sendOTPEmail } = require('../services/emailService');
 const { authenticateToken } = require('../middleware/auth');
@@ -14,6 +15,14 @@ const otpStore = new Map();
 // Generate OTP
 const generateOTP = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
+};
+
+const normalizeCompanyId = (membership) => {
+    if (!membership) return null;
+    const raw = membership.companyId ?? membership.company;
+    if (!raw) return null;
+    if (typeof raw === 'object' && raw._id) return String(raw._id);
+    return String(raw);
 };
 
 // 0. Register company (SaaS tenant) with owner account
@@ -139,17 +148,20 @@ router.post('/login', async (req, res) => {
             }
         }
 
-        const companyIds = (user.companies || []).map((entry) => entry.company).filter(Boolean);
+        const companyIds = (user.companies || [])
+            .map((entry) => normalizeCompanyId(entry))
+            .filter((id) => id && mongoose.Types.ObjectId.isValid(id));
         const companies = companyIds.length
             ? await Company.find({ _id: { $in: companyIds } }).select('name email ownerUser')
             : [];
 
         const companiesWithMembership = (user.companies || []).map((entry) => {
+            const entryCompanyId = normalizeCompanyId(entry);
             const matchedCompany = companies.find(
-                (company) => company._id.toString() === entry.company.toString()
+                (company) => entryCompanyId && company._id.toString() === entryCompanyId
             );
             return {
-                companyId: entry.company,
+                companyId: entryCompanyId,
                 companyRole: entry.companyRole,
                 isOwner: entry.isOwner,
                 company: matchedCompany || null
@@ -161,13 +173,13 @@ router.post('/login', async (req, res) => {
 
         if (bodyCompanyId) {
             const cid = String(bodyCompanyId).trim();
-            const ok = memberships.some((e) => e.company && e.company.toString() === cid);
+            const ok = memberships.some((e) => normalizeCompanyId(e) === cid);
             if (!ok) {
                 return res.status(403).json({ message: 'You are not a member of the selected company' });
             }
             activeCompanyId = cid;
         } else if (memberships.length === 1) {
-            activeCompanyId = memberships[0].company.toString();
+            activeCompanyId = normalizeCompanyId(memberships[0]);
         } else if (memberships.length > 1) {
             return res.status(400).json({
                 message: 'companyId is required: you belong to more than one company',
@@ -201,6 +213,7 @@ router.post('/login', async (req, res) => {
         });
     } catch (error) {
         console.error('Login error:', error);
+        console.error('Login error stack:', error?.stack);
         res.status(500).json({ message: 'Internal server error' });
     }
 });
