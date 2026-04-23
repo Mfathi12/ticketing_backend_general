@@ -1,7 +1,9 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const { User, Company } = require('../models');
 const { authenticateToken, requireRole } = require('../middleware/auth');
+const { sendUserInviteEmail } = require('../services/emailService');
 
 const router = express.Router();
 const membershipCompanyId = (entry) => {
@@ -33,11 +35,14 @@ const mapCompaniesWithMembership = async (memberships = []) => {
         };
     });
 };
+const createInviteToken = () => crypto.randomBytes(32).toString('hex');
+const hashInviteToken = (token) =>
+    crypto.createHash('sha256').update(String(token)).digest('hex');
 
 // 3. Add user to company — active company from JWT; owner / company admin / manager may invite
 router.post('/add-account', authenticateToken, async (req, res) => {
     try {
-        const { name, title, email, password, role } = req.body;
+        const { name, title, email, role } = req.body;
 
         if (!req.companyId) {
             return res.status(400).json({
@@ -64,23 +69,28 @@ router.post('/add-account', authenticateToken, async (req, res) => {
         const normalizedEmail = email.toLowerCase().trim();
         let targetUser = await User.findOne({ email: normalizedEmail });
         const companyRole = role || 'user';
+        const inviteToken = createInviteToken();
+        const inviteTokenHash = hashInviteToken(inviteToken);
+        const inviteExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
+        const inviterName = req.user?.name || 'Team admin';
 
         if (!targetUser) {
-            if (!password) {
-                return res.status(400).json({ message: 'password is required when creating a new user' });
-            }
-            const hashedPassword = await bcrypt.hash(password, 12);
             targetUser = await User.create({
                 name,
                 title,
                 email: normalizedEmail,
-                password: hashedPassword,
                 role: companyRole,
                 companies: [{
                     company: companyId,
                     companyRole,
                     isOwner: false
-                }]
+                }],
+                invite: {
+                    tokenHash: inviteTokenHash,
+                    expiresAt: inviteExpiresAt,
+                    invitedBy: req.user._id,
+                    company: companyId
+                }
             });
         } else {
             const alreadyInCompany = (targetUser.companies || []).some(
@@ -95,6 +105,15 @@ router.post('/add-account', authenticateToken, async (req, res) => {
                 companyRole,
                 isOwner: false
             });
+            if (!targetUser.password) {
+                targetUser.invite = {
+                    tokenHash: inviteTokenHash,
+                    expiresAt: inviteExpiresAt,
+                    invitedBy: req.user._id,
+                    company: companyId,
+                    acceptedAt: null
+                };
+            }
             await targetUser.save();
         }
 
@@ -115,15 +134,37 @@ router.post('/add-account', authenticateToken, async (req, res) => {
             await company.save();
         }
 
+        const shouldSendInvite = !targetUser.password || (targetUser.invite && targetUser.invite.tokenHash === inviteTokenHash);
+        let inviteLink = null;
+        if (shouldSendInvite) {
+            const frontendBaseUrl = (process.env.FRONTEND_URL || 'https://tickets.absai.dev').replace(/\/+$/, '');
+            inviteLink = `${frontendBaseUrl}/accept-invite?token=${encodeURIComponent(inviteToken)}`;
+            try {
+                await sendUserInviteEmail({
+                    email: normalizedEmail,
+                    invitedByName: inviterName,
+                    companyName: company.name,
+                    inviteUrl: inviteLink,
+                    expiresInHours: 24
+                });
+            } catch (emailErr) {
+                console.error('Failed to send invite email:', emailErr.message);
+            }
+        }
+
         res.status(201).json({
-            message: 'User added to company successfully',
+            message: shouldSendInvite
+                ? 'User invited successfully. Invitation email sent.'
+                : 'User added to company successfully',
+            inviteSent: Boolean(shouldSendInvite),
             user: {
                 id: targetUser._id,
                 name: targetUser.name,
                 title: targetUser.title,
                 email: targetUser.email,
                 role: targetUser.role
-            }
+            },
+            ...(inviteLink ? { inviteLink } : {})
         });
     } catch (error) {
         console.error('Add account error:', error);
@@ -297,6 +338,45 @@ router.post('/unregister-fcm-token', authenticateToken, async (req, res) => {
         });
     } catch (error) {
         console.error('Unregister FCM token error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+// Accept invite and set password
+router.post('/accept-invite', async (req, res) => {
+    try {
+        const { token, password } = req.body;
+        if (!token || !password) {
+            return res.status(400).json({ message: 'token and password are required' });
+        }
+        if (String(password).length < 6) {
+            return res.status(400).json({ message: 'Password must be at least 6 characters' });
+        }
+
+        const tokenHash = hashInviteToken(token);
+        const user = await User.findOne({
+            'invite.tokenHash': tokenHash
+        });
+        if (!user) {
+            return res.status(400).json({ message: 'Invalid invitation token' });
+        }
+        if (!user.invite?.expiresAt || new Date(user.invite.expiresAt).getTime() < Date.now()) {
+            return res.status(400).json({ message: 'Invitation token expired' });
+        }
+
+        user.password = await bcrypt.hash(password, 12);
+        user.invite = {
+            tokenHash: null,
+            expiresAt: null,
+            invitedBy: user.invite?.invitedBy || null,
+            company: user.invite?.company || null,
+            acceptedAt: new Date()
+        };
+        await user.save();
+
+        res.json({ message: 'Invitation accepted successfully. You can now login.' });
+    } catch (error) {
+        console.error('Accept invite error:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 });

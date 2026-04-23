@@ -20,8 +20,14 @@ const userSchema = new mongoose.Schema({
     },
     password: {
         type: String,
-        required: true,
-        minlength: 6
+        required: false,
+        validate: {
+            validator(value) {
+                if (!value) return true;
+                return String(value).length >= 6;
+            },
+            message: 'Password must be at least 6 characters'
+        }
     },
     role: {
         type: String,
@@ -48,6 +54,30 @@ const userSchema = new mongoose.Schema({
     fcmTokens: {
         type: [String],
         default: []
+    },
+    invite: {
+        tokenHash: {
+            type: String,
+            default: null
+        },
+        expiresAt: {
+            type: Date,
+            default: null
+        },
+        invitedBy: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'User',
+            default: null
+        },
+        company: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Company',
+            default: null
+        },
+        acceptedAt: {
+            type: Date,
+            default: null
+        }
     }
 }, {
     timestamps: true

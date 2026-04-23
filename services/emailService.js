@@ -163,8 +163,46 @@ const sendOTPEmail = async (email, otp) => {
     await sendEmail(email, subject, text, html);
 };
 
+const sendUserInviteEmail = async ({
+    email,
+    invitedByName,
+    companyName,
+    inviteUrl,
+    expiresInHours = 24
+}) => {
+    const subject = `You're invited to join ${companyName}`;
+    const text = [
+        `Hello,`,
+        ``,
+        `${invitedByName || 'A team admin'} invited you to join ${companyName}.`,
+        `Set your password and activate your account using this link:`,
+        inviteUrl,
+        ``,
+        `This invitation expires in ${expiresInHours} hours.`
+    ].join('\n');
+
+    const html = `
+        <div style="font-family: Arial, sans-serif; max-width: 640px; margin: 0 auto;">
+            <h2 style="color: #222;">You're invited to join ${companyName}</h2>
+            <p>${invitedByName || 'A team admin'} added you as a team member.</p>
+            <p>Click the button below to set your password and activate your account:</p>
+            <p style="margin: 24px 0;">
+                <a href="${inviteUrl}" style="background:#ff5a0a;color:#fff;padding:12px 18px;border-radius:8px;text-decoration:none;font-weight:600;">
+                    Accept Invitation
+                </a>
+            </p>
+            <p style="font-size: 13px; color: #555;">If the button does not work, use this link:</p>
+            <p style="font-size: 13px; word-break: break-all;">${inviteUrl}</p>
+            <p style="font-size: 13px; color: #666;">This invitation expires in ${expiresInHours} hours.</p>
+        </div>
+    `;
+
+    await sendEmail(email, subject, text, html);
+};
+
 module.exports = {
     sendEmail,
-        sendTicketNotification,
-    sendOTPEmail
+    sendTicketNotification,
+    sendOTPEmail,
+    sendUserInviteEmail
 };
