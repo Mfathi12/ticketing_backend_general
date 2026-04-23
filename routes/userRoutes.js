@@ -4,6 +4,13 @@ const { User, Company } = require('../models');
 const { authenticateToken, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
+const membershipCompanyId = (entry) => {
+    if (!entry) return null;
+    const raw = entry.companyId ?? entry.company;
+    if (!raw) return null;
+    if (typeof raw === 'object' && raw._id) return String(raw._id);
+    return String(raw);
+};
 
 // 3. Add user to company — active company from JWT; owner / company admin / manager may invite
 router.post('/add-account', authenticateToken, async (req, res) => {
@@ -55,7 +62,7 @@ router.post('/add-account', authenticateToken, async (req, res) => {
             });
         } else {
             const alreadyInCompany = (targetUser.companies || []).some(
-                (entry) => entry.company.toString() === companyId
+                (entry) => membershipCompanyId(entry) === companyId
             );
             if (alreadyInCompany) {
                 return res.status(400).json({ message: 'User is already a member of this company' });

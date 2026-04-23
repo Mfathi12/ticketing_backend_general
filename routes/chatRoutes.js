@@ -8,6 +8,13 @@ const path = require('path');
 const fs = require('fs');
 
 const router = express.Router();
+const membershipCompanyId = (entry) => {
+    if (!entry) return null;
+    const raw = entry.companyId ?? entry.company;
+    if (!raw) return null;
+    if (typeof raw === 'object' && raw._id) return String(raw._id);
+    return String(raw);
+};
 
 // Derive file extension from mimetype when missing (e.g. images from some clients)
 const getExtFromMimetype = (mimetype, fieldname) => {
@@ -110,7 +117,7 @@ router.post('/conversation', authenticateToken, async (req, res) => {
             return res.status(404).json({ message: 'Participant not found' });
         }
         const participantInCompany = (participant.companies || []).some(
-            (m) => m.company && m.company.toString() === activeCompanyId
+            (m) => membershipCompanyId(m) === activeCompanyId
         );
         if (!participantInCompany) {
             return res.status(403).json({ message: 'Participant is not in active company' });

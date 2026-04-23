@@ -4,6 +4,13 @@ const { Conversation } = require('../models/chat');
 const { authenticateToken } = require('../middleware/auth');
 
 const router = express.Router();
+const membershipCompanyId = (entry) => {
+    if (!entry) return null;
+    const raw = entry.companyId ?? entry.company;
+    if (!raw) return null;
+    if (typeof raw === 'object' && raw._id) return String(raw._id);
+    return String(raw);
+};
 
 // 5. Add new project (Admin/Manager only)
 router.post('/add-project', authenticateToken, async (req, res) => {
@@ -35,7 +42,7 @@ router.post('/add-project', authenticateToken, async (req, res) => {
             }
 
             const allBelongToCompany = validUsers.every((u) =>
-                (u.companies || []).some((entry) => entry.company && entry.company.toString() === activeCompanyId)
+                (u.companies || []).some((entry) => membershipCompanyId(entry) === activeCompanyId)
             );
             if (!allBelongToCompany) {
                 return res.status(400).json({ message: 'Assigned users must belong to the active company' });
@@ -118,7 +125,7 @@ router.put('/assign-users/:projectId', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: 'Some assigned users are invalid' });
         }
         const allBelongToCompany = validUsers.every((u) =>
-            (u.companies || []).some((entry) => entry.company && entry.company.toString() === activeCompanyId)
+            (u.companies || []).some((entry) => membershipCompanyId(entry) === activeCompanyId)
         );
         if (!allBelongToCompany) {
             return res.status(400).json({ message: 'Assigned users must belong to the active company' });

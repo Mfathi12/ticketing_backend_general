@@ -310,13 +310,14 @@ router.post('/login', async (req, res) => {
 // Switch active company (new JWT with companyId)
 router.post('/switch-company', authenticateToken, async (req, res) => {
     try {
+        if (!(await ensureDbConnected(res))) return;
         const { companyId } = req.body;
         if (!companyId) {
             return res.status(400).json({ message: 'companyId is required' });
         }
         const cid = String(companyId).trim();
         const membership = (req.user.companies || []).find(
-            (e) => e.company && e.company.toString() === cid
+            (e) => normalizeCompanyId(e) === cid
         );
         if (!membership) {
             return res.status(403).json({ message: 'You are not a member of this company' });
