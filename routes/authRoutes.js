@@ -17,6 +17,17 @@ const generateOTP = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
+const ensureDbConnected = (res) => {
+    // 1 = connected. Prevent Mongoose buffering timeouts when DB is down.
+    if (mongoose.connection.readyState !== 1) {
+        res.status(503).json({
+            message: 'Database is temporarily unavailable. Please try again in a moment.'
+        });
+        return false;
+    }
+    return true;
+};
+
 const normalizeCompanyId = (membership) => {
     if (!membership) return null;
     const raw = membership.companyId ?? membership.company;
@@ -28,6 +39,7 @@ const normalizeCompanyId = (membership) => {
 // 0. Register company (SaaS tenant) with owner account
 router.post('/register-company', async (req, res) => {
     try {
+        if (!ensureDbConnected(res)) return;
         const { companyName, email, password } = req.body;
 
         if (!companyName || !email || !password) {
@@ -152,6 +164,7 @@ router.post('/register-company', async (req, res) => {
 // 1. Login via email and password
 router.post('/login', async (req, res) => {
     try {
+        if (!ensureDbConnected(res)) return;
         const { email, password, companyId: bodyCompanyId, token: fcmToken } = req.body;
 
         if (!email || !password) {
@@ -295,6 +308,7 @@ router.post('/switch-company', authenticateToken, async (req, res) => {
 // 2. Forget password
 router.post('/forgot-password', async (req, res) => {
     try {
+        if (!ensureDbConnected(res)) return;
         const { email } = req.body;
 
         if (!email) {
@@ -323,6 +337,7 @@ router.post('/forgot-password', async (req, res) => {
 // 3. Verify OTP and reset password
 router.post('/verify-otp', async (req, res) => {
     try {
+        if (!ensureDbConnected(res)) return;
         const { email, otp, newPassword } = req.body;
 
         if (!email || !otp || !newPassword) {
