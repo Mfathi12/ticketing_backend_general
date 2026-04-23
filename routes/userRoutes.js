@@ -137,7 +137,7 @@ router.post('/add-account', authenticateToken, async (req, res) => {
         const shouldSendInvite = !targetUser.password || (targetUser.invite && targetUser.invite.tokenHash === inviteTokenHash);
         let inviteLink = null;
         if (shouldSendInvite) {
-            const frontendBaseUrl = (process.env.FRONTEND_URL || 'https://tickets.absai.dev').replace(/\/+$/, '');
+            const frontendBaseUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
             inviteLink = `${frontendBaseUrl}/accept-invite?token=${encodeURIComponent(inviteToken)}`;
             try {
                 await sendUserInviteEmail({
