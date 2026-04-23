@@ -17,9 +17,47 @@ const generateOTP = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
-const ensureDbConnected = (res) => {
-    // 1 = connected. Prevent Mongoose buffering timeouts when DB is down.
-    if (mongoose.connection.readyState !== 1) {
+const waitForDbReady = async (timeoutMs = 4000) => {
+    const conn = mongoose.connection;
+    if (conn.readyState === 1) return true; // connected
+
+    const mongoUri = process.env.MONGODB_URI;
+    if (conn.readyState === 0 && mongoUri) {
+        // In serverless/cold starts, connection might not be started yet.
+        try {
+            await mongoose.connect(mongoUri);
+            return true;
+        } catch (_) {
+            // fallback to timed wait below
+        }
+    }
+
+    return new Promise((resolve) => {
+        let done = false;
+        const finish = (ok) => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            conn.off('connected', onConnected);
+            conn.off('open', onConnected);
+            conn.off('error', onError);
+            conn.off('disconnected', onError);
+            resolve(ok);
+        };
+        const onConnected = () => finish(true);
+        const onError = () => finish(false);
+        const timer = setTimeout(() => finish(conn.readyState === 1), timeoutMs);
+
+        conn.on('connected', onConnected);
+        conn.on('open', onConnected);
+        conn.on('error', onError);
+        conn.on('disconnected', onError);
+    });
+};
+
+const ensureDbConnected = async (res) => {
+    const ok = await waitForDbReady(5000);
+    if (!ok) {
         res.status(503).json({
             message: 'Database is temporarily unavailable. Please try again in a moment.'
         });
@@ -39,7 +77,7 @@ const normalizeCompanyId = (membership) => {
 // 0. Register company (SaaS tenant) with owner account
 router.post('/register-company', async (req, res) => {
     try {
-        if (!ensureDbConnected(res)) return;
+        if (!(await ensureDbConnected(res))) return;
         const { companyName, email, password } = req.body;
 
         if (!companyName || !email || !password) {
@@ -164,7 +202,7 @@ router.post('/register-company', async (req, res) => {
 // 1. Login via email and password
 router.post('/login', async (req, res) => {
     try {
-        if (!ensureDbConnected(res)) return;
+        if (!(await ensureDbConnected(res))) return;
         const { email, password, companyId: bodyCompanyId, token: fcmToken } = req.body;
 
         if (!email || !password) {
@@ -308,7 +346,7 @@ router.post('/switch-company', authenticateToken, async (req, res) => {
 // 2. Forget password
 router.post('/forgot-password', async (req, res) => {
     try {
-        if (!ensureDbConnected(res)) return;
+        if (!(await ensureDbConnected(res))) return;
         const { email } = req.body;
 
         if (!email) {
@@ -337,7 +375,7 @@ router.post('/forgot-password', async (req, res) => {
 // 3. Verify OTP and reset password
 router.post('/verify-otp', async (req, res) => {
     try {
-        if (!ensureDbConnected(res)) return;
+        if (!(await ensureDbConnected(res))) return;
         const { email, otp, newPassword } = req.body;
 
         if (!email || !otp || !newPassword) {
