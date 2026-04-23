@@ -11,6 +11,28 @@ const membershipCompanyId = (entry) => {
     if (typeof raw === 'object' && raw._id) return String(raw._id);
     return String(raw);
 };
+const mapCompaniesWithMembership = async (memberships = []) => {
+    const companyIds = memberships
+        .map((entry) => membershipCompanyId(entry))
+        .filter(Boolean);
+
+    const companies = companyIds.length
+        ? await Company.find({ _id: { $in: companyIds } }).select('name email ownerUser')
+        : [];
+
+    return memberships.map((entry) => {
+        const entryCompanyId = membershipCompanyId(entry);
+        const matchedCompany = companies.find(
+            (company) => entryCompanyId && company._id.toString() === entryCompanyId
+        );
+        return {
+            companyId: entryCompanyId,
+            companyRole: entry.companyRole,
+            isOwner: entry.isOwner,
+            company: matchedCompany || null
+        };
+    });
+};
 
 // 3. Add user to company — active company from JWT; owner / company admin / manager may invite
 router.post('/add-account', authenticateToken, async (req, res) => {
@@ -333,7 +355,22 @@ router.get('/all-users', authenticateToken, async (req, res) => {
 router.get('/profile', authenticateToken, async (req, res) => {
     try {
         const user = await User.findById(req.user._id).select('-password');
-        res.json({ user });
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const companiesWithMembership = await mapCompaniesWithMembership(user.companies || []);
+
+        res.json({
+            user: {
+                id: user._id,
+                name: user.name,
+                title: user.title,
+                email: user.email,
+                role: user.role,
+                companies: companiesWithMembership
+            }
+        });
     } catch (error) {
         console.error('Get profile error:', error);
         res.status(500).json({ message: 'Internal server error' });
