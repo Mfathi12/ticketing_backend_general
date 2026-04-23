@@ -2,7 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { User, Company } = require('../models');
-const { authenticateToken, requireRole } = require('../middleware/auth');
+const { authenticateToken } = require('../middleware/auth');
 const { sendUserInviteEmail } = require('../services/emailService');
 
 const router = express.Router();
@@ -38,6 +38,11 @@ const mapCompaniesWithMembership = async (memberships = []) => {
 const createInviteToken = () => crypto.randomBytes(32).toString('hex');
 const hashInviteToken = (token) =>
     crypto.createHash('sha256').update(String(token)).digest('hex');
+const COMPANY_ROLES = ['owner', 'admin', 'manager', 'developer', 'tester', 'user'];
+const canManageActiveCompanyUsers = (req) => {
+    const m = req.companyMembership;
+    return Boolean(m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole)));
+};
 
 // 3. Add user to company — active company from JWT; owner / company admin / manager may invite
 router.post('/add-account', authenticateToken, async (req, res) => {
@@ -69,6 +74,9 @@ router.post('/add-account', authenticateToken, async (req, res) => {
         const normalizedEmail = email.toLowerCase().trim();
         let targetUser = await User.findOne({ email: normalizedEmail });
         const companyRole = role || 'user';
+        if (!COMPANY_ROLES.includes(companyRole)) {
+            return res.status(400).json({ message: `Invalid role. Allowed roles: ${COMPANY_ROLES.join(', ')}` });
+        }
         const inviteToken = createInviteToken();
         const inviteTokenHash = hashInviteToken(inviteToken);
         const inviteExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
@@ -172,13 +180,29 @@ router.post('/add-account', authenticateToken, async (req, res) => {
     }
 });
 
-// 4. Delete account (Admin/Manager only)
-router.delete('/delete-account/:userId', authenticateToken, requireRole(['admin', 'manager']), async (req, res) => {
+// 4. Remove user from active company (owner/admin/manager only)
+router.delete('/delete-account/:userId', authenticateToken, async (req, res) => {
     try {
         const { userId } = req.params;
+        if (!req.companyId) {
+            return res.status(400).json({
+                message: 'Active company required. Log in with a company, register a company, or call POST /api/auth/switch-company.'
+            });
+        }
+        if (!canManageActiveCompanyUsers(req)) {
+            return res.status(403).json({
+                message: 'Only company owner, admin or manager can remove users from this company'
+            });
+        }
+
+        const companyId = req.companyId.toString();
+        const company = await Company.findById(companyId);
+        if (!company) {
+            return res.status(404).json({ message: 'Company not found' });
+        }
 
         if (req.user._id.toString() === userId) {
-            return res.status(400).json({ message: 'Cannot delete your own account' });
+            return res.status(400).json({ message: 'Cannot remove your own account from this company' });
         }
 
         const user = await User.findById(userId);
@@ -186,9 +210,27 @@ router.delete('/delete-account/:userId', authenticateToken, requireRole(['admin'
             return res.status(404).json({ message: 'User not found' });
         }
 
-        await User.findByIdAndDelete(userId);
+        const userMembership = (user.companies || []).find(
+            (entry) => membershipCompanyId(entry) === companyId
+        );
+        if (!userMembership) {
+            return res.status(400).json({ message: 'User is not a member of the active company' });
+        }
+        if (userMembership.isOwner || userMembership.companyRole === 'owner') {
+            return res.status(400).json({ message: 'Company owner cannot be removed' });
+        }
 
-        res.json({ message: 'Account deleted successfully' });
+        user.companies = (user.companies || []).filter(
+            (entry) => membershipCompanyId(entry) !== companyId
+        );
+        await user.save();
+
+        company.members = (company.members || []).filter(
+            (member) => member.user.toString() !== userId
+        );
+        await company.save();
+
+        res.json({ message: 'User removed from company successfully' });
     } catch (error) {
         console.error('Delete account error:', error);
         res.status(500).json({ message: 'Internal server error' });
@@ -202,16 +244,36 @@ router.put('/update-user/:userId', authenticateToken, async (req, res) => {
         const { name, title, email, role } = req.body;
 
         // Check if user has permission to update
-        const isAdminOrManager = req.user.role === 'admin' || req.user.role === 'manager';
         const isOwnAccount = req.user._id.toString() === userId;
+        const canManageCompanyUser = canManageActiveCompanyUsers(req);
 
-        if (!isAdminOrManager && !isOwnAccount) {
+        if (!canManageCompanyUser && !isOwnAccount) {
             return res.status(403).json({ message: 'You can only update your own account' });
         }
 
         const user = await User.findById(userId);
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
+        }
+
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        const targetMembership = activeCompanyId
+            ? (user.companies || []).find((entry) => membershipCompanyId(entry) === activeCompanyId)
+            : null;
+
+        // Editing another user must be inside the active company context
+        if (!isOwnAccount) {
+            if (!activeCompanyId) {
+                return res.status(400).json({
+                    message: 'Active company required. Log in with a company or switch company first.'
+                });
+            }
+            if (!targetMembership) {
+                return res.status(403).json({ message: 'You can only update users in your active company' });
+            }
+            if (targetMembership.isOwner || targetMembership.companyRole === 'owner') {
+                return res.status(400).json({ message: 'Company owner cannot be edited from this action' });
+            }
         }
 
         // Build update object
@@ -227,19 +289,36 @@ router.put('/update-user/:userId', authenticateToken, async (req, res) => {
             updateData.email = email.toLowerCase();
         }
 
-        // Only admin/manager can change role
+        // Role update is company-scoped (membership role in active company)
         if (role) {
-            if (!isAdminOrManager) {
-                return res.status(403).json({ message: 'Only admin or manager can change user roles' });
+            if (!canManageCompanyUser || !activeCompanyId) {
+                return res.status(403).json({ message: 'Only company owner, admin or manager can change user roles' });
             }
-            updateData.role = role;
+            if (!COMPANY_ROLES.includes(role)) {
+                return res.status(400).json({ message: `Invalid role. Allowed roles: ${COMPANY_ROLES.join(', ')}` });
+            }
+            const membershipIndex = (user.companies || []).findIndex(
+                (entry) => membershipCompanyId(entry) === activeCompanyId
+            );
+            if (membershipIndex === -1) {
+                return res.status(400).json({ message: 'User is not a member of active company' });
+            }
+            user.companies[membershipIndex].companyRole = role;
         }
 
-        const updatedUser = await User.findByIdAndUpdate(
-            userId,
-            updateData,
-            { new: true }
-        ).select('-password');
+        if (Object.keys(updateData).length) {
+            Object.assign(user, updateData);
+        }
+        await user.save();
+
+        if (role && activeCompanyId) {
+            await Company.updateOne(
+                { _id: activeCompanyId, 'members.user': user._id },
+                { $set: { 'members.$.role': role } }
+            );
+        }
+
+        const updatedUser = await User.findById(userId).select('-password');
 
         res.json({
             message: 'User updated successfully',
