@@ -149,6 +149,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
             {
                 amount: amountCents,
                 currency: targetPlan.currency || 'EGP',
+                merchant_order_id: merchantOrderId,
                 payment_methods: [integrationId],
                 items: [
                     {
@@ -194,7 +195,12 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
             ...(company.subscription || {}),
             status: 'pending',
             pendingPlanId: targetPlan.id,
-            paymobOrderId: String(intentionRes?.data?.id || ''),
+            paymobOrderId: String(
+                intentionRes?.data?.order?.id ||
+                intentionRes?.data?.order_id ||
+                intentionRes?.data?.id ||
+                ''
+            ),
             updatedAt: new Date()
         };
         await company.save();
@@ -224,6 +230,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
 router.post('/paymob/webhook', async (req, res) => {
     try {
         const obj = req.body?.obj || req.body;
+        console.log('Paymob webhook payload:', JSON.stringify(obj || {}, null, 2));
         const merchantOrderId =
             obj?.order?.merchant_order_id ||
             obj?.extras?.merchant_order_id ||
@@ -233,12 +240,22 @@ router.post('/paymob/webhook', async (req, res) => {
         const payloadPlanId =
             obj?.extras?.planId ||
             obj?.payment_key_claims?.extra?.planId;
-        const success = Boolean(obj?.success);
-        const companyId = String(merchantOrderId || '');
-        if (!companyId) {
-            return res.status(400).json({ message: 'Missing companyId in webhook payload' });
+        const orderId = obj?.order?.id || obj?.order?.order_id || null;
+        const success =
+            obj?.success === true ||
+            String(obj?.success).toLowerCase() === 'true' ||
+            obj?.order?.payment_status === 'PAID' ||
+            obj?.payment_status === 'PAID';
+        const companyId = merchantOrderId ? String(merchantOrderId) : '';
+        let company = null;
+        if (companyId) {
+            company = await Company.findById(companyId);
         }
-        const company = await Company.findById(companyId);
+        if (!company && orderId) {
+            company = await Company.findOne({
+                'subscription.paymobOrderId': String(orderId)
+            });
+        }
         if (!company) {
             return res.status(404).json({ message: 'Company not found' });
         }
