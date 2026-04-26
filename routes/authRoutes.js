@@ -5,6 +5,7 @@ const mongoose = require('mongoose');
 const { User, Company } = require('../models');
 const { sendOTPEmail } = require('../services/emailService');
 const { authenticateToken } = require('../middleware/auth');
+const { getCompanyPlan, evaluateAndSyncCompanySubscription } = require('../services/subscriptionService');
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
@@ -74,6 +75,20 @@ const normalizeCompanyId = (membership) => {
     return String(raw);
 };
 
+const mapCompaniesWithMembership = (memberships = [], companies = []) =>
+    memberships.map((entry) => {
+        const entryCompanyId = normalizeCompanyId(entry);
+        const matchedCompany = companies.find(
+            (company) => entryCompanyId && company._id.toString() === entryCompanyId
+        );
+        return {
+            companyId: entryCompanyId,
+            companyRole: entry.companyRole,
+            isOwner: entry.isOwner,
+            company: matchedCompany || null
+        };
+    });
+
 // 0. Register company (SaaS tenant) with owner account
 router.post('/register-company', async (req, res) => {
     try {
@@ -119,6 +134,14 @@ router.post('/register-company', async (req, res) => {
             name: companyName.trim(),
             email: normalizedEmail,
             ownerUser: ownerUser._id,
+            subscription: {
+                planId: 'free',
+                status: 'active',
+                isTrial: false,
+                trialEndsAt: null,
+                expiresAt: null,
+                graceEndsAt: null
+            },
             members: [{
                 user: ownerUser._id,
                 role: 'owner',
@@ -164,6 +187,9 @@ router.post('/register-company', async (req, res) => {
             await ownerUser.save();
         }
 
+        const companies = await Company.find({ _id: { $in: [company._id] } }).select('name email ownerUser');
+        const companiesWithMembership = mapCompaniesWithMembership(ownerUser.companies || [], companies);
+
         const token = jwt.sign(
             {
                 userId: ownerUser._id,
@@ -190,8 +216,17 @@ router.post('/register-company', async (req, res) => {
                 title: ownerUser.title,
                 email: ownerUser.email,
                 role: ownerUser.role,
-                companies: ownerUser.companies
-            }
+                companies: companiesWithMembership
+            },
+            subscription: {
+                planId: 'free',
+                status: 'active',
+                isTrial: false,
+                expiresAt: null,
+                graceEndsAt: null,
+                trialEndsAt: null
+            },
+            activePlan: getCompanyPlan(company)
         });
     } catch (error) {
         console.error('Register company error:', error);
@@ -244,18 +279,7 @@ router.post('/login', async (req, res) => {
             ? await Company.find({ _id: { $in: companyIds } }).select('name email ownerUser')
             : [];
 
-        const companiesWithMembership = (user.companies || []).map((entry) => {
-            const entryCompanyId = normalizeCompanyId(entry);
-            const matchedCompany = companies.find(
-                (company) => entryCompanyId && company._id.toString() === entryCompanyId
-            );
-            return {
-                companyId: entryCompanyId,
-                companyRole: entry.companyRole,
-                isOwner: entry.isOwner,
-                company: matchedCompany || null
-            };
-        });
+        const companiesWithMembership = mapCompaniesWithMembership(user.companies || [], companies);
 
         const memberships = user.companies || [];
         let activeCompanyId = null;
@@ -286,6 +310,13 @@ router.post('/login', async (req, res) => {
         }
 
         const token = jwt.sign(payload, JWT_SECRET);
+        const activeCompany = activeCompanyId
+            ? await Company.findById(activeCompanyId).select('subscription')
+            : null;
+        const subscriptionState = activeCompany
+            ? await evaluateAndSyncCompanySubscription(activeCompany)
+            : null;
+        const activePlan = activeCompany ? getCompanyPlan(activeCompany) : getCompanyPlan({ subscription: { planId: 'free' } });
 
         res.json({
             message: 'Login successful',
@@ -298,7 +329,19 @@ router.post('/login', async (req, res) => {
                 email: user.email,
                 role: user.role,
                 companies: companiesWithMembership
-            }
+            },
+            subscription: activeCompany
+                ? {
+                    planId: activeCompany.subscription?.planId || 'free',
+                    status: activeCompany.subscription?.status || 'active',
+                    expiresAt: activeCompany.subscription?.expiresAt || null,
+                    graceEndsAt: activeCompany.subscription?.graceEndsAt || null,
+                    isTrial: Boolean(activeCompany.subscription?.isTrial),
+                    trialEndsAt: activeCompany.subscription?.trialEndsAt || null
+                }
+                : null,
+            activePlan,
+            subscriptionNotice: subscriptionState?.notice || null
         });
     } catch (error) {
         console.error('Login error:', error);

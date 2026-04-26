@@ -32,7 +32,46 @@ const companySchema = new mongoose.Schema({
             type: Boolean,
             default: false
         }
-    }]
+    }],
+    subscription: {
+        planId: {
+            type: String,
+            default: 'free'
+        },
+        status: {
+            type: String,
+            enum: ['active', 'pending', 'expired', 'cancelled'],
+            default: 'active'
+        },
+        isTrial: {
+            type: Boolean,
+            default: false
+        },
+        trialEndsAt: {
+            type: Date,
+            default: null
+        },
+        expiresAt: {
+            type: Date,
+            default: null
+        },
+        graceEndsAt: {
+            type: Date,
+            default: null
+        },
+        paymobOrderId: {
+            type: String,
+            default: null
+        },
+        paymobTransactionId: {
+            type: String,
+            default: null
+        },
+        updatedAt: {
+            type: Date,
+            default: Date.now
+        }
+    }
 }, {
     timestamps: true
 });

@@ -1,7 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const Attendance = require('../models/attendance');
+const { Company } = require('../models');
 const { authenticateToken } = require('../middleware/auth');
+const { getCompanyPlan } = require('../services/subscriptionService');
 const {
     generateMonthlyReport,
     generateMonthlyReportXlsx,
@@ -14,6 +16,38 @@ const { rolloverStaleOpenSessionsForUser } = require('../services/attendanceRemi
 /** Open session = checked in but not checked out yet (multiple sessions per day allowed after checkout) */
 const openSessionFilter = {
     $or: [{ checkOut: { $exists: false } }, { checkOut: null }]
+};
+
+const ensureAttendanceEditAllowed = async (companyId) => {
+    const company = await Company.findById(companyId).select('subscription');
+    if (!company) {
+        return { allowed: false, reason: 'Company not found', status: 404 };
+    }
+    const plan = getCompanyPlan(company);
+    if (!plan?.limits?.canEditAttendance) {
+        return {
+            allowed: false,
+            reason: 'Attendance editing is not available on Free plan. Please upgrade your subscription.',
+            status: 403
+        };
+    }
+    return { allowed: true };
+};
+
+const ensureAttendanceDownloadAllowed = async (companyId) => {
+    const company = await Company.findById(companyId).select('subscription');
+    if (!company) {
+        return { allowed: false, reason: 'Company not found', status: 404 };
+    }
+    const plan = getCompanyPlan(company);
+    if (!plan?.limits?.canDownloadAttendanceReport) {
+        return {
+            allowed: false,
+            reason: 'Attendance report download is not available on Free plan. Please upgrade your subscription.',
+            status: 403
+        };
+    }
+    return { allowed: true };
 };
 
 
@@ -142,6 +176,10 @@ router.put(
             const canEdit = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
             if (!canEdit) {
                 return res.status(403).json({ message: 'Insufficient permissions' });
+            }
+            const editAllowed = await ensureAttendanceEditAllowed(activeCompanyId);
+            if (!editAllowed.allowed) {
+                return res.status(editAllowed.status).json({ message: editAllowed.reason });
             }
 
             const attendance = await Attendance.findOne({ _id: attendanceId, company: activeCompanyId });
@@ -331,6 +369,10 @@ router.get('/admin/report', authenticateToken, async (req, res) => {
         const canReadAll = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
         if (!canReadAll) {
             return res.status(403).json({ message: 'Insufficient permissions' });
+        }
+        const downloadAllowed = await ensureAttendanceDownloadAllowed(activeCompanyId);
+        if (!downloadAllowed.allowed) {
+            return res.status(downloadAllowed.status).json({ message: downloadAllowed.reason });
         }
         const { month, year } = req.query;
         const format = String(req.query.format || 'xlsx').toLowerCase();

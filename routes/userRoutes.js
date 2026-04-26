@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { User, Company } = require('../models');
 const { authenticateToken } = require('../middleware/auth');
 const { sendUserInviteEmail } = require('../services/emailService');
+const { canAddMembers, getCompanyPlan } = require('../services/subscriptionService');
 
 const router = express.Router();
 const membershipCompanyId = (entry) => {
@@ -72,6 +73,21 @@ router.post('/add-account', authenticateToken, async (req, res) => {
         }
 
         const normalizedEmail = email.toLowerCase().trim();
+        const company = await Company.findById(companyId);
+        if (!company) {
+            return res.status(404).json({ message: 'Company not found' });
+        }
+
+        const currentMembersCount = Array.isArray(company.members) ? company.members.length : 0;
+        if (!canAddMembers(company, currentMembersCount, 1)) {
+            const activePlan = getCompanyPlan(company);
+            return res.status(403).json({
+                message: `Current ${activePlan.name} plan allows up to ${activePlan.limits.maxMembers} accounts.`,
+                limit: activePlan.limits.maxMembers,
+                planId: activePlan.id
+            });
+        }
+
         let targetUser = await User.findOne({ email: normalizedEmail });
         const companyRole = role || 'user';
         if (!COMPANY_ROLES.includes(companyRole)) {
@@ -123,11 +139,6 @@ router.post('/add-account', authenticateToken, async (req, res) => {
                 };
             }
             await targetUser.save();
-        }
-
-        const company = await Company.findById(companyId);
-        if (!company) {
-            return res.status(404).json({ message: 'Company not found' });
         }
 
         const userExistsInCompany = (company.members || []).some(

@@ -1,8 +1,9 @@
 const express = require('express');
 const { Conversation, Message } = require('../models/chat');
-const { User, Project } = require('../models');
+const { User, Project, Company } = require('../models');
 const { createNotification } = require('../services/notificationService');
 const { authenticateToken } = require('../middleware/auth');
+const { getCompanyPlan } = require('../services/subscriptionService');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -93,6 +94,33 @@ const upload = multer({
         fileSize: 50 * 1024 * 1024 // 50MB max file size
     }
 });
+
+const ensureChatAttachmentAllowed = async (req, res, next) => {
+    try {
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        if (!activeCompanyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
+
+        const company = await Company.findById(activeCompanyId).select('subscription');
+        if (!company) {
+            return res.status(404).json({ message: 'Company not found' });
+        }
+
+        const plan = getCompanyPlan(company);
+        if (!plan?.limits?.canUploadChatAttachments) {
+            return res.status(403).json({
+                message: 'Chat attachments are not available on Free plan. Please upgrade your subscription.',
+                planId: plan.id
+            });
+        }
+
+        next();
+    } catch (error) {
+        console.error('Chat attachment subscription check error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+};
 
 // Get or create conversation between two users
 router.post('/conversation', authenticateToken, async (req, res) => {
@@ -776,7 +804,7 @@ router.get('/message/:messageId/thread', authenticateToken, async (req, res) => 
 
 // Upload and send file message (voice, image, video, file)
 // Use upload.any() to accept files with different fieldnames (voice, image, video, file)
-router.post('/message/file', authenticateToken, upload.any(), async (req, res) => {
+router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upload.any(), async (req, res) => {
     try {
         const activeCompanyId = req.companyId ? req.companyId.toString() : null;
         if (!activeCompanyId) {
