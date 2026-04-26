@@ -4,7 +4,7 @@ require('dotenv').config();
 
 const Company = require('../models/company');
 
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:9090/api';
+const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:9091/api';
 
 const results = [];
 const now = Date.now();

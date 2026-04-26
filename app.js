@@ -23,7 +23,7 @@ const {
 const { seedDefaultAdmin } = require('./utils/seedDatabase');
 
 const app = express();
-const port = process.env.PORT || 9090;
+const port = process.env.PORT || 9091;
 
 // Socket.io setup
 const http = require('http');
