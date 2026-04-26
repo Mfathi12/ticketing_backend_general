@@ -18,7 +18,7 @@ const canManageSubscription = (membership) =>
     Boolean(membership && (membership.isOwner || ['admin', 'manager'].includes(membership.companyRole)));
 
 const amountToCents = (amount) => Math.round(Number(amount || 0) * 100);
-const PAYMENT_METHOD_LIST = ['card', 'wallet', 'kiosk'];
+const PAYMENT_METHOD_LIST = ['card'];
 
 const getIntegrationIdForMethod = (paymentMethod, fallbackId) => {
     const method = String(paymentMethod || '').trim().toLowerCase();
@@ -88,21 +88,19 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         }
 
         const { planId, paymentMethod, name, email, phoneNumber, country } = req.body;
+        const normalizedPaymentMethod = String(paymentMethod || 'card').toLowerCase();
         const targetPlan = getPlanById(planId);
         if (!targetPlan || targetPlan.id === 'free') {
             return res.status(400).json({ message: 'Please select a paid plan' });
         }
-        if (paymentMethod == null) {
-            return res.status(400).json({ message: 'Payment method is required' });
-        }
-        if (!PAYMENT_METHOD_LIST.includes(String(paymentMethod).toLowerCase())) {
+        if (!PAYMENT_METHOD_LIST.includes(normalizedPaymentMethod)) {
             return res.status(400).json({
-                message: 'Invalid payment method',
+                message: 'Only card payment is supported',
                 allowedMethods: PAYMENT_METHOD_LIST
             });
         }
 
-        const integrationId = getIntegrationIdForMethod(paymentMethod, targetPlan.paymobIntegrationId);
+        const integrationId = getIntegrationIdForMethod(normalizedPaymentMethod, targetPlan.paymobIntegrationId);
         if (!integrationId) {
             return res.status(400).json({ message: 'Plan is missing Paymob integration ID' });
         }
@@ -156,7 +154,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
                     companyId: String(req.companyId),
                     merchant_order_id: merchantOrderId,
                     planId: targetPlan.id,
-                    paymentMethod: String(paymentMethod).toLowerCase()
+                    paymentMethod: normalizedPaymentMethod
                 }
             },
             {
@@ -187,7 +185,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         res.json({
             message: 'Paymob checkout created successfully',
             checkoutUrl,
-            paymentMethod: String(paymentMethod).toLowerCase(),
+            paymentMethod: normalizedPaymentMethod,
             paymentDetails: intentionRes.data,
             plan: {
                 id: targetPlan.id,
