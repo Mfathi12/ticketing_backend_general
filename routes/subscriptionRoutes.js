@@ -116,6 +116,23 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         if (!company) {
             return res.status(404).json({ message: 'Company not found' });
         }
+        const now = new Date();
+        const currentPlanId = company.subscription?.planId || 'free';
+        const currentExpiry = company.subscription?.expiresAt
+            ? new Date(company.subscription.expiresAt)
+            : null;
+        const hasUnexpiredSubscription =
+            currentPlanId !== 'free' &&
+            currentExpiry &&
+            currentExpiry > now;
+
+        if (hasUnexpiredSubscription && currentPlanId === targetPlan.id) {
+            return res.status(400).json({
+                message: `You already have an active ${targetPlan.name} subscription until ${new Date(company.subscription.expiresAt).toISOString()}.`,
+                planId: targetPlan.id,
+                expiresAt: company.subscription.expiresAt
+            });
+        }
 
         const amountCents = amountToCents(targetPlan.price);
         const merchantOrderId = String(req.companyId);
