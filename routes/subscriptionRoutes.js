@@ -108,6 +108,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         const paymobApiUrl = process.env.PAYMOB_API_URL || 'https://accept.paymob.com/v1/intention';
         const paymobSecretKey = process.env.PAYMOB_SECRET_KEY;
         const paymobPublicKey = process.env.PAYMOB_PUBLIC_KEY;
+        const paymobRedirectUrl = process.env.PAYMOB_REDIRECT_URL || 'http://localhost:3000/subscription';
         if (!paymobSecretKey || !paymobPublicKey) {
             return res.status(500).json({ message: 'PAYMOB_SECRET_KEY and PAYMOB_PUBLIC_KEY are required' });
         }
@@ -150,6 +151,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
                 amount: amountCents,
                 currency: targetPlan.currency || 'EGP',
                 merchant_order_id: merchantOrderId,
+                redirection_url: paymobRedirectUrl,
                 payment_methods: [integrationId],
                 items: [
                     {
@@ -307,6 +309,80 @@ router.post('/paymob/webhook', async (req, res) => {
     } catch (error) {
         console.error('Paymob webhook error:', error);
         res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+router.post('/paymob/confirm', authenticateToken, async (req, res) => {
+    try {
+        if (!req.companyId) {
+            return res.status(400).json({ message: 'Active company required' });
+        }
+        if (!canManageSubscription(req.companyMembership)) {
+            return res.status(403).json({ message: 'Insufficient permissions' });
+        }
+
+        const company = await Company.findById(req.companyId);
+        if (!company) {
+            return res.status(404).json({ message: 'Company not found' });
+        }
+        if (company.subscription?.status !== 'pending' || !company.subscription?.pendingPlanId) {
+            return res.status(400).json({ message: 'No pending subscription found to confirm' });
+        }
+
+        const { postPayUrl = '', success = false } = req.body || {};
+        let successFlag = Boolean(success);
+        let transactionId = null;
+        if (postPayUrl && typeof postPayUrl === 'string') {
+            try {
+                const parsed = new URL(postPayUrl);
+                const successParam = parsed.searchParams.get('success');
+                if (successParam != null) {
+                    successFlag = String(successParam).toLowerCase() === 'true';
+                }
+                transactionId = parsed.searchParams.get('id') || null;
+            } catch (_) {
+                return res.status(400).json({ message: 'Invalid postPayUrl' });
+            }
+        }
+
+        if (!successFlag) {
+            return res.status(400).json({ message: 'Payment is not marked as successful' });
+        }
+
+        const selectedPlan = getPlanById(company.subscription.pendingPlanId);
+        const oldExpiry = company.subscription?.expiresAt ? new Date(company.subscription.expiresAt) : null;
+        const renewalAnchor = oldExpiry || new Date();
+        const expiresAt = addMonths(renewalAnchor, 1);
+        const graceEndsAt = addDays(expiresAt, GRACE_PERIOD_DAYS);
+
+        company.subscription = {
+            ...(company.subscription || {}),
+            planId: selectedPlan.id,
+            status: 'active',
+            isTrial: selectedPlan.trialDays > 0,
+            trialEndsAt: selectedPlan.trialDays > 0
+                ? new Date(Date.now() + selectedPlan.trialDays * 24 * 60 * 60 * 1000)
+                : null,
+            expiresAt,
+            graceEndsAt,
+            pendingPlanId: null,
+            paymobTransactionId: transactionId || company.subscription?.paymobTransactionId || null,
+            updatedAt: new Date()
+        };
+        await company.save();
+
+        return res.json({
+            message: 'Subscription activated successfully',
+            subscription: {
+                planId: company.subscription.planId,
+                status: company.subscription.status,
+                expiresAt: company.subscription.expiresAt,
+                graceEndsAt: company.subscription.graceEndsAt
+            }
+        });
+    } catch (error) {
+        console.error('Paymob confirm error:', error);
+        return res.status(500).json({ message: 'Internal server error' });
     }
 });
 
