@@ -80,6 +80,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         if (!targetPlan.paymobIntegrationId) {
             return res.status(400).json({ message: 'Plan is missing Paymob integration ID' });
         }
+        
 
         const apiKey = process.env.PAYMOB_API_KEY;
         const iframeId = process.env.PAYMOB_IFRAME_ID;
