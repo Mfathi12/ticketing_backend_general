@@ -23,15 +23,15 @@ const PAYMENT_METHOD_LIST = ['card'];
 const getIntegrationIdForMethod = (paymentMethod, fallbackId) => {
     const method = String(paymentMethod || '').trim().toLowerCase();
     if (method === 'card') {
-        return Number(process.env.PAYMOB_CARD_INTEGRATION_ID || fallbackId || process.env.PAYMOB_INTEGRATION_ID);
+        return Number(process.env.PAYMOB_CARD_INTEGRATION_ID || process.env.PAYMOB_INTEGRATION_ID || fallbackId);
     }
     if (method === 'wallet') {
-        return Number(process.env.PAYMOB_WALLET_INTEGRATION_ID || fallbackId || process.env.PAYMOB_INTEGRATION_ID);
+        return Number(process.env.PAYMOB_WALLET_INTEGRATION_ID || process.env.PAYMOB_INTEGRATION_ID || fallbackId);
     }
     if (method === 'kiosk') {
-        return Number(process.env.PAYMOB_KIOSK_INTEGRATION_ID || fallbackId || process.env.PAYMOB_INTEGRATION_ID);
+        return Number(process.env.PAYMOB_KIOSK_INTEGRATION_ID || process.env.PAYMOB_INTEGRATION_ID || fallbackId);
     }
-    return Number(fallbackId || process.env.PAYMOB_INTEGRATION_ID);
+    return Number(process.env.PAYMOB_INTEGRATION_ID || fallbackId);
 };
 
 const buildBillingData = (company, user) => ({
@@ -195,8 +195,11 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
             }
         });
     } catch (error) {
-        console.error('Paymob checkout error:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        console.error('Paymob checkout error:', error?.response?.data || error.message);
+        res.status(500).json({
+            message: 'Internal server error',
+            error: error?.response?.data || error.message
+        });
     }
 });
 
