@@ -1,4 +1,5 @@
 const express = require('express');
+const axios = require('axios');
 const { authenticateToken } = require('../middleware/auth');
 const { Company } = require('../models');
 const {
@@ -17,6 +18,21 @@ const canManageSubscription = (membership) =>
     Boolean(membership && (membership.isOwner || ['admin', 'manager'].includes(membership.companyRole)));
 
 const amountToCents = (amount) => Math.round(Number(amount || 0) * 100);
+const PAYMENT_METHOD_LIST = ['card', 'wallet', 'kiosk'];
+
+const getIntegrationIdForMethod = (paymentMethod, fallbackId) => {
+    const method = String(paymentMethod || '').trim().toLowerCase();
+    if (method === 'card') {
+        return Number(process.env.PAYMOB_CARD_INTEGRATION_ID || fallbackId || process.env.PAYMOB_INTEGRATION_ID);
+    }
+    if (method === 'wallet') {
+        return Number(process.env.PAYMOB_WALLET_INTEGRATION_ID || fallbackId || process.env.PAYMOB_INTEGRATION_ID);
+    }
+    if (method === 'kiosk') {
+        return Number(process.env.PAYMOB_KIOSK_INTEGRATION_ID || fallbackId || process.env.PAYMOB_INTEGRATION_ID);
+    }
+    return Number(fallbackId || process.env.PAYMOB_INTEGRATION_ID);
+};
 
 const buildBillingData = (company, user) => ({
     apartment: 'NA',
@@ -71,21 +87,31 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
             return res.status(403).json({ message: 'Insufficient permissions' });
         }
 
-        const { planId } = req.body;
+        const { planId, paymentMethod, name, email, phoneNumber, country } = req.body;
         const targetPlan = getPlanById(planId);
         if (!targetPlan || targetPlan.id === 'free') {
             return res.status(400).json({ message: 'Please select a paid plan' });
         }
+        if (paymentMethod == null) {
+            return res.status(400).json({ message: 'Payment method is required' });
+        }
+        if (!PAYMENT_METHOD_LIST.includes(String(paymentMethod).toLowerCase())) {
+            return res.status(400).json({
+                message: 'Invalid payment method',
+                allowedMethods: PAYMENT_METHOD_LIST
+            });
+        }
 
-        if (!targetPlan.paymobIntegrationId) {
+        const integrationId = getIntegrationIdForMethod(paymentMethod, targetPlan.paymobIntegrationId);
+        if (!integrationId) {
             return res.status(400).json({ message: 'Plan is missing Paymob integration ID' });
         }
-        
 
-        const apiKey = process.env.PAYMOB_API_KEY;
-        const iframeId = process.env.PAYMOB_IFRAME_ID;
-        if (!apiKey) {
-            return res.status(500).json({ message: 'PAYMOB_API_KEY is not configured' });
+        const paymobApiUrl = process.env.PAYMOB_API_URL || 'https://accept.paymob.com/v1/intention';
+        const paymobSecretKey = process.env.PAYMOB_SECRET_KEY;
+        const paymobPublicKey = process.env.PAYMOB_PUBLIC_KEY;
+        if (!paymobSecretKey || !paymobPublicKey) {
+            return res.status(500).json({ message: 'PAYMOB_SECRET_KEY and PAYMOB_PUBLIC_KEY are required' });
         }
 
         const company = await Company.findById(req.companyId).select('name email subscription');
@@ -93,70 +119,76 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
             return res.status(404).json({ message: 'Company not found' });
         }
 
-        const authRes = await fetch('https://accept.paymob.com/api/auth/tokens', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ api_key: apiKey })
-        });
-        const authData = await authRes.json();
-        if (!authRes.ok || !authData?.token) {
-            return res.status(502).json({ message: 'Failed to authenticate with Paymob', details: authData });
-        }
-
         const amountCents = amountToCents(targetPlan.price);
-        const merchantOrderId = `company:${req.companyId}:plan:${targetPlan.id}:ts:${Date.now()}`;
+        const merchantOrderId = String(req.companyId);
+        const billingData = {
+            ...buildBillingData(company, req.user),
+            first_name: name || req.user?.name || company.name || 'Guest',
+            email: email || req.user?.email || company.email || 'guest@test.com',
+            phone_number: phoneNumber || '01000000000',
+            country: country || 'EG'
+        };
 
-        const orderRes = await fetch('https://accept.paymob.com/api/ecommerce/orders', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                auth_token: authData.token,
-                delivery_needed: false,
-                amount_cents: amountCents,
-                currency: targetPlan.currency,
-                merchant_order_id: merchantOrderId,
-                items: []
-            })
-        });
-        const orderData = await orderRes.json();
-        if (!orderRes.ok || !orderData?.id) {
-            return res.status(502).json({ message: 'Failed to create Paymob order', details: orderData });
-        }
+        const intentionRes = await axios.post(
+            paymobApiUrl,
+            {
+                amount: amountCents,
+                currency: targetPlan.currency || 'EGP',
+                payment_methods: [integrationId],
+                items: [
+                    {
+                        name: `${targetPlan.name} Subscription`,
+                        amount: amountCents,
+                        description: targetPlan.description || 'Subscription payment',
+                        quantity: 1
+                    }
+                ],
+                billing_data: billingData,
+                customer: {
+                    first_name: billingData.first_name,
+                    last_name: billingData.last_name || 'User',
+                    email: billingData.email,
+                    country: billingData.country,
+                    phone_number: billingData.phone_number
+                },
+                extras: {
+                    project: 'TICKETING',
+                    companyId: String(req.companyId),
+                    merchant_order_id: merchantOrderId,
+                    planId: targetPlan.id,
+                    paymentMethod: String(paymentMethod).toLowerCase()
+                }
+            },
+            {
+                headers: {
+                    Authorization: `Token ${paymobSecretKey}`,
+                    'Content-Type': 'application/json'
+                }
+            }
+        );
 
-        const paymentKeyRes = await fetch('https://accept.paymob.com/api/acceptance/payment_keys', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                auth_token: authData.token,
-                amount_cents: amountCents,
-                expiration: 3600,
-                order_id: orderData.id,
-                billing_data: buildBillingData(company, req.user),
-                currency: targetPlan.currency,
-                integration_id: targetPlan.paymobIntegrationId
-            })
-        });
-        const paymentKeyData = await paymentKeyRes.json();
-        if (!paymentKeyRes.ok || !paymentKeyData?.token) {
-            return res.status(502).json({ message: 'Failed to generate Paymob payment key', details: paymentKeyData });
+        const clientSecret = intentionRes?.data?.client_secret;
+        if (!clientSecret) {
+            return res.status(502).json({
+                message: 'Missing client_secret from Paymob response',
+                details: intentionRes?.data || null
+            });
         }
 
         company.subscription = {
             ...(company.subscription || {}),
-            paymobOrderId: String(orderData.id),
+            status: 'pending',
+            paymobOrderId: String(intentionRes?.data?.id || ''),
             updatedAt: new Date()
         };
         await company.save();
-
-        const checkoutUrl = iframeId
-            ? `https://accept.paymob.com/api/acceptance/iframes/${iframeId}?payment_token=${paymentKeyData.token}`
-            : null;
+        const checkoutUrl = `https://accept.paymob.com/unifiedcheckout/?publicKey=${paymobPublicKey}&clientSecret=${clientSecret}`;
 
         res.json({
             message: 'Paymob checkout created successfully',
             checkoutUrl,
-            paymentToken: paymentKeyData.token,
-            orderId: orderData.id,
+            paymentMethod: String(paymentMethod).toLowerCase(),
+            paymentDetails: intentionRes.data,
             plan: {
                 id: targetPlan.id,
                 name: targetPlan.name,
@@ -172,17 +204,20 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
 
 router.post('/paymob/webhook', async (req, res) => {
     try {
-        const obj = req.body?.obj;
-        const merchantOrderId = obj?.order?.merchant_order_id;
+        const obj = req.body?.obj || req.body;
+        const merchantOrderId =
+            obj?.order?.merchant_order_id ||
+            obj?.extras?.merchant_order_id ||
+            obj?.extras?.companyId ||
+            obj?.payment_key_claims?.extra?.merchant_order_id ||
+            obj?.payment_key_claims?.extra?.companyId;
+        const planId =
+            obj?.extras?.planId ||
+            obj?.payment_key_claims?.extra?.planId;
         const success = Boolean(obj?.success);
-        if (!merchantOrderId || !String(merchantOrderId).startsWith('company:')) {
-            return res.status(400).json({ message: 'Invalid merchant_order_id' });
-        }
-        const parts = String(merchantOrderId).split(':');
-        const companyId = parts[1];
-        const planId = parts[3];
+        const companyId = String(merchantOrderId || '');
         if (!companyId || !planId) {
-            return res.status(400).json({ message: 'Invalid merchant_order_id format' });
+            return res.status(400).json({ message: 'Missing companyId or planId in webhook payload' });
         }
         const company = await Company.findById(companyId);
         if (!company) {
