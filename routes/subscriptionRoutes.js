@@ -193,6 +193,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         company.subscription = {
             ...(company.subscription || {}),
             status: 'pending',
+            pendingPlanId: targetPlan.id,
             paymobOrderId: String(intentionRes?.data?.id || ''),
             updatedAt: new Date()
         };
@@ -229,17 +230,21 @@ router.post('/paymob/webhook', async (req, res) => {
             obj?.extras?.companyId ||
             obj?.payment_key_claims?.extra?.merchant_order_id ||
             obj?.payment_key_claims?.extra?.companyId;
-        const planId =
+        const payloadPlanId =
             obj?.extras?.planId ||
             obj?.payment_key_claims?.extra?.planId;
         const success = Boolean(obj?.success);
         const companyId = String(merchantOrderId || '');
-        if (!companyId || !planId) {
-            return res.status(400).json({ message: 'Missing companyId or planId in webhook payload' });
+        if (!companyId) {
+            return res.status(400).json({ message: 'Missing companyId in webhook payload' });
         }
         const company = await Company.findById(companyId);
         if (!company) {
             return res.status(404).json({ message: 'Company not found' });
+        }
+        const planId = payloadPlanId || company.subscription?.pendingPlanId;
+        if (!planId) {
+            return res.status(400).json({ message: 'Missing planId and no pending plan found for company' });
         }
 
         if (success) {
@@ -262,6 +267,7 @@ router.post('/paymob/webhook', async (req, res) => {
                     : null,
                 expiresAt,
                 graceEndsAt,
+                pendingPlanId: null,
                 paymobTransactionId: String(obj?.id || ''),
                 updatedAt: new Date()
             };
@@ -274,6 +280,7 @@ router.post('/paymob/webhook', async (req, res) => {
                 trialEndsAt: null,
                 expiresAt: null,
                 graceEndsAt: null,
+                pendingPlanId: null,
                 updatedAt: new Date()
             };
         }

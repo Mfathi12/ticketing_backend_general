@@ -59,6 +59,10 @@ const companySchema = new mongoose.Schema({
             type: Date,
             default: null
         },
+        pendingPlanId: {
+            type: String,
+            default: null
+        },
         paymobOrderId: {
             type: String,
             default: null
