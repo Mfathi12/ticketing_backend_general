@@ -105,12 +105,10 @@ const ensurePlanTranslationsSeeded = async () => {
     if (plansSeedPromise) return plansSeedPromise;
     plansSeedPromise = (async () => {
         const basePlans = serializePlans();
-        const existing = await SubscriptionPlanContent.find({
+        const existingDocs = await SubscriptionPlanContent.find({
             planId: { $in: basePlans.map((p) => p.id) }
-        })
-            .select('planId')
-            .lean();
-        const existingIds = new Set(existing.map((doc) => doc.planId));
+        }).lean();
+        const existingIds = new Set(existingDocs.map((doc) => doc.planId));
 
         const inserts = basePlans
             .filter((plan) => !existingIds.has(plan.id))
@@ -134,6 +132,51 @@ const ensurePlanTranslationsSeeded = async () => {
 
         if (inserts.length) {
             await SubscriptionPlanContent.insertMany(inserts, { ordered: false });
+        }
+
+        // Repair old DB rows where Arabic translation was missing/incorrect (same as English).
+        const updates = [];
+        for (const plan of basePlans) {
+            const doc = existingDocs.find((d) => d.planId === plan.id);
+            if (!doc) continue;
+            const defaultEn = localizePlan(plan, 'en');
+            const defaultAr = localizePlan(plan, 'ar');
+            const en = doc.translations?.en || {};
+            const ar = doc.translations?.ar || {};
+            const arLooksEnglish =
+                (ar.name && ar.name === en.name) ||
+                (ar.description && ar.description === en.description) ||
+                (ar.billingPeriod && ar.billingPeriod === en.billingPeriod);
+            const arMissing =
+                !ar.name ||
+                !ar.description ||
+                !ar.billingPeriod ||
+                !Array.isArray(ar.features) ||
+                ar.features.length === 0;
+
+            if (arMissing || arLooksEnglish) {
+                updates.push({
+                    updateOne: {
+                        filter: { planId: plan.id },
+                        update: {
+                            $set: {
+                                'translations.en.name': en.name || defaultEn.name,
+                                'translations.en.description': en.description || defaultEn.description,
+                                'translations.en.billingPeriod': en.billingPeriod || defaultEn.billingPeriod,
+                                'translations.en.features': Array.isArray(en.features) && en.features.length ? en.features : defaultEn.features,
+                                'translations.ar.name': defaultAr.name,
+                                'translations.ar.description': defaultAr.description,
+                                'translations.ar.billingPeriod': defaultAr.billingPeriod,
+                                'translations.ar.features': defaultAr.features
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
+        if (updates.length) {
+            await SubscriptionPlanContent.bulkWrite(updates, { ordered: false });
         }
     })().catch((error) => {
         plansSeedPromise = null;
