@@ -25,6 +25,10 @@ const dictionaries = {
             invalid_post_pay_url: 'Invalid postPayUrl',
             payment_not_successful: 'Payment is not marked as successful',
             subscription_activated: 'Subscription activated successfully',
+            cancelled_successfully: 'Subscription cancelled successfully',
+            missing_paymob_subscription_id: 'Missing Paymob subscription id',
+            paymob_api_key_required: 'PAYMOB_API_KEY is required to manage recurring subscriptions',
+            plan_missing_subscription_plan_id: 'Plan is missing Paymob subscription plan ID',
             notice_grace: 'Your subscription expired. Grace period ends in {{days}} day(s).',
             notice_downgraded: 'Your grace period ended and your subscription has been downgraded to Free.'
         },
@@ -72,6 +76,10 @@ const dictionaries = {
             invalid_post_pay_url: 'رابط postPay غير صالح',
             payment_not_successful: 'عملية الدفع غير مؤكدة كنجاح',
             subscription_activated: 'تم تفعيل الاشتراك بنجاح',
+            cancelled_successfully: 'تم إلغاء الاشتراك بنجاح',
+            missing_paymob_subscription_id: 'معرّف اشتراك Paymob غير موجود',
+            paymob_api_key_required: 'مفتاح PAYMOB_API_KEY مطلوب لإدارة الاشتراكات التلقائية',
+            plan_missing_subscription_plan_id: 'معرّف خطة الاشتراك في Paymob غير متوفر لهذه الباقة',
             notice_grace: 'انتهى الاشتراك. فترة السماح تنتهي بعد {{days}} يوم.',
             notice_downgraded: 'انتهت فترة السماح وتم التحويل إلى الباقة المجانية.'
         },

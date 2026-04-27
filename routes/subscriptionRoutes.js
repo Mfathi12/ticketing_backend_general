@@ -20,6 +20,8 @@ const canManageSubscription = (membership) =>
 
 const amountToCents = (amount) => Math.round(Number(amount || 0) * 100);
 const PAYMENT_METHOD_LIST = ['card'];
+const PAYMOB_BASE_URL = process.env.PAYMOB_BASE_URL || 'https://accept.paymob.com';
+let paymobAuthTokenCache = { token: null, expiresAt: 0 };
 
 const getIntegrationIdForMethod = (paymentMethod, fallbackId) => {
     const method = String(paymentMethod || '').trim().toLowerCase();
@@ -51,6 +53,47 @@ const buildBillingData = (company, user) => ({
     state: 'Cairo'
 });
 
+const extractPaymobSubscriptionId = (payload) => {
+    const candidates = [
+        payload?.subscription?.id,
+        payload?.subscription_id,
+        payload?.subscriptionv2_id,
+        payload?.obj?.subscription?.id,
+        payload?.obj?.subscription_id,
+        payload?.obj?.subscriptionv2_id,
+        payload?.order?.subscription_id,
+        payload?.extras?.subscription_id,
+        payload?.payment_key_claims?.extra?.subscription_id
+    ];
+    const found = candidates.find((value) => value !== null && value !== undefined && String(value).trim() !== '');
+    return found != null ? String(found) : null;
+};
+
+const getPaymobAuthToken = async () => {
+    const now = Date.now();
+    if (paymobAuthTokenCache.token && paymobAuthTokenCache.expiresAt > now + 10_000) {
+        return paymobAuthTokenCache.token;
+    }
+
+    const apiKey = process.env.PAYMOB_API_KEY;
+    if (!apiKey) return null;
+
+    const tokenRes = await axios.post(
+        `${PAYMOB_BASE_URL}/api/auth/tokens`,
+        { api_key: apiKey },
+        { headers: { 'Content-Type': 'application/json' } }
+    );
+    const token = tokenRes?.data?.token || null;
+    if (!token) return null;
+
+    // Paymob auth token validity ~1 hour.
+    paymobAuthTokenCache = {
+        token,
+        expiresAt: Date.now() + 55 * 60 * 1000
+    };
+    return token;
+};
+
 router.get('/plans', authenticateToken, async (_req, res) => {
     const lang = _req.lang || 'en';
     res.json({ plans: serializePlans().map((plan) => localizePlan(plan, lang)) });
@@ -73,6 +116,7 @@ router.get('/me', authenticateToken, async (req, res) => {
         status: company.subscription?.status || 'active',
         expiresAt: company.subscription?.expiresAt || null,
         graceEndsAt: company.subscription?.graceEndsAt || null,
+        paymobSubscriptionId: company.subscription?.paymobSubscriptionId || null,
         isTrial: Boolean(company.subscription?.isTrial),
         trialEndsAt: company.subscription?.trialEndsAt || null,
         gracePeriodDays: GRACE_PERIOD_DAYS,
@@ -105,6 +149,9 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         const integrationId = getIntegrationIdForMethod(normalizedPaymentMethod, targetPlan.paymobIntegrationId);
         if (!integrationId) {
             return res.status(400).json({ message: t(req.lang, 'subscription.plan_missing_integration') });
+        }
+        if (!targetPlan.paymobSubscriptionPlanId) {
+            return res.status(400).json({ message: t(req.lang, 'subscription.plan_missing_subscription_plan_id') });
         }
 
         const paymobApiUrl = process.env.PAYMOB_API_URL || 'https://accept.paymob.com/v1/intention';
@@ -158,6 +205,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
                 merchant_order_id: merchantOrderId,
                 redirection_url: paymobRedirectUrl,
                 payment_methods: [integrationId],
+                subscription_plan_id: targetPlan.paymobSubscriptionPlanId,
                 items: [
                     {
                         name: `${targetPlan.name} Subscription`,
@@ -202,6 +250,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
             ...(company.subscription || {}),
             status: 'pending',
             pendingPlanId: targetPlan.id,
+            paymobSubscriptionId: null,
             paymobOrderId: String(
                 intentionRes?.data?.order?.id ||
                 intentionRes?.data?.order_id ||
@@ -300,6 +349,11 @@ router.post('/paymob/webhook', async (req, res) => {
                 graceEndsAt,
                 pendingPlanId: null,
                 paymobTransactionId: String(obj?.id || ''),
+                paymobSubscriptionId:
+                    extractPaymobSubscriptionId(req.body) ||
+                    extractPaymobSubscriptionId(obj) ||
+                    company.subscription?.paymobSubscriptionId ||
+                    null,
                 updatedAt: new Date()
             };
         } else {
@@ -312,6 +366,7 @@ router.post('/paymob/webhook', async (req, res) => {
                 expiresAt: null,
                 graceEndsAt: null,
                 pendingPlanId: null,
+                paymobSubscriptionId: null,
                 updatedAt: new Date()
             };
         }
@@ -379,6 +434,10 @@ router.post('/paymob/confirm', authenticateToken, async (req, res) => {
             graceEndsAt,
             pendingPlanId: null,
             paymobTransactionId: transactionId || company.subscription?.paymobTransactionId || null,
+            paymobSubscriptionId:
+                extractPaymobSubscriptionId(req.body) ||
+                company.subscription?.paymobSubscriptionId ||
+                null,
             updatedAt: new Date()
         };
         await company.save();
@@ -389,12 +448,79 @@ router.post('/paymob/confirm', authenticateToken, async (req, res) => {
                 planId: company.subscription.planId,
                 status: company.subscription.status,
                 expiresAt: company.subscription.expiresAt,
-                graceEndsAt: company.subscription.graceEndsAt
+                graceEndsAt: company.subscription.graceEndsAt,
+                paymobSubscriptionId: company.subscription.paymobSubscriptionId || null
             }
         });
     } catch (error) {
         console.error('Paymob confirm error:', error);
         return res.status(500).json({ message: t(req.lang, 'common.internal_server_error') });
+    }
+});
+
+router.post('/paymob/cancel', authenticateToken, async (req, res) => {
+    try {
+        if (!req.companyId) {
+            return res.status(400).json({ message: t(req.lang, 'common.active_company_required') });
+        }
+        if (!canManageSubscription(req.companyMembership)) {
+            return res.status(403).json({ message: t(req.lang, 'common.insufficient_permissions') });
+        }
+
+        const company = await Company.findById(req.companyId);
+        if (!company) {
+            return res.status(404).json({ message: t(req.lang, 'common.company_not_found') });
+        }
+
+        const bodySubscriptionId = req.body?.subscriptionId;
+        const paymobSubscriptionId = String(
+            bodySubscriptionId || company.subscription?.paymobSubscriptionId || ''
+        ).trim();
+
+        if (!paymobSubscriptionId) {
+            return res.status(400).json({ message: t(req.lang, 'subscription.missing_paymob_subscription_id') });
+        }
+
+        const authToken = await getPaymobAuthToken();
+        if (!authToken) {
+            return res.status(500).json({ message: t(req.lang, 'subscription.paymob_api_key_required') });
+        }
+
+        await axios.post(
+            `${PAYMOB_BASE_URL}/api/acceptance/subscriptions/${paymobSubscriptionId}/cancel`,
+            {},
+            {
+                headers: {
+                    Authorization: `Bearer ${authToken}`
+                }
+            }
+        );
+
+        company.subscription = {
+            ...(company.subscription || {}),
+            status: 'cancelled',
+            pendingPlanId: null,
+            paymobSubscriptionId,
+            updatedAt: new Date()
+        };
+        await company.save();
+
+        return res.json({
+            message: t(req.lang, 'subscription.cancelled_successfully'),
+            subscription: {
+                planId: company.subscription.planId,
+                status: company.subscription.status,
+                expiresAt: company.subscription.expiresAt || null,
+                graceEndsAt: company.subscription.graceEndsAt || null,
+                paymobSubscriptionId: company.subscription.paymobSubscriptionId || null
+            }
+        });
+    } catch (error) {
+        console.error('Paymob cancel subscription error:', error?.response?.data || error);
+        return res.status(500).json({
+            message: t(req.lang, 'common.internal_server_error'),
+            error: error?.response?.data || error?.message || null
+        });
     }
 });
 

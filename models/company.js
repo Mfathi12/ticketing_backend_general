@@ -71,6 +71,10 @@ const companySchema = new mongoose.Schema({
             type: String,
             default: null
         },
+        paymobSubscriptionId: {
+            type: String,
+            default: null
+        },
         updatedAt: {
             type: Date,
             default: Date.now

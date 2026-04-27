@@ -37,6 +37,7 @@ const SUBSCRIPTION_PLANS = [
         isPopular: true,
         isActive: true,
         paymobIntegrationId: Number(process.env.PAYMOB_BASIC_INTEGRATION_ID || 123456),
+        paymobSubscriptionPlanId: Number(process.env.PAYMOB_SUBSCRIPTION_PLAN_ID_BASIC || 0) || null,
         trialDays: 0,
         limits: {
             maxMembers: 10,
@@ -60,6 +61,7 @@ const SUBSCRIPTION_PLANS = [
         isPopular: false,
         isActive: true,
         paymobIntegrationId: Number(process.env.PAYMOB_PRO_INTEGRATION_ID || 789012),
+        paymobSubscriptionPlanId: Number(process.env.PAYMOB_SUBSCRIPTION_PLAN_ID_PRO || 0) || null,
         trialDays: 7,
         limits: {
             maxMembers: 50,
@@ -91,6 +93,7 @@ const serializePlans = () =>
         isPopular: plan.isPopular,
         isActive: plan.isActive,
         paymobIntegrationId: plan.paymobIntegrationId,
+        paymobSubscriptionPlanId: plan.paymobSubscriptionPlanId,
         trialDays: plan.trialDays
     }));
 
