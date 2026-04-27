@@ -34,6 +34,7 @@ const dictionaries = {
             notice_downgraded: 'Your grace period ended and your subscription has been downgraded to Free.'
         },
         plans: {
+            monthly: 'Monthly',
             free_name: 'Free',
             free_description: 'Default plan for new companies',
             free_feature_1: 'Up to 3 accounts',
@@ -49,6 +50,13 @@ const dictionaries = {
             pro_feature_1: 'From 10 to 50 members',
             pro_feature_2: 'Chat attachments enabled',
             pro_feature_3: 'Attendance edit and report download'
+        },
+        notifications: {
+            active_company_required: 'Active company required',
+            all_marked_read: 'All notifications marked as read',
+            marked_read: 'Notifications marked as read',
+            ids_or_all_required: 'Provide body.ids (array of notification ids) or body.all: true',
+            not_found: 'Notification not found'
         }
     },
     ar: {
@@ -86,6 +94,7 @@ const dictionaries = {
             notice_downgraded: 'انتهت فترة السماح وتم التحويل إلى الباقة المجانية.'
         },
         plans: {
+            monthly: 'شهريًا',
             free_name: 'مجانية',
             free_description: 'الباقة الافتراضية للشركات الجديدة',
             free_feature_1: 'حتى 3 حسابات',
@@ -101,6 +110,13 @@ const dictionaries = {
             pro_feature_1: 'من 10 إلى 50 فرد',
             pro_feature_2: 'إتاحة مرفقات الشات',
             pro_feature_3: 'تعديل الحضور وتحميل التقارير'
+        },
+        notifications: {
+            active_company_required: 'يجب تحديد الشركة النشطة',
+            all_marked_read: 'تم تحديد كل الإشعارات كمقروءة',
+            marked_read: 'تم تحديد الإشعارات كمقروءة',
+            ids_or_all_required: 'يرجى إرسال body.ids (مصفوفة معرفات الإشعارات) أو body.all: true',
+            not_found: 'الإشعار غير موجود'
         }
     }
 };
@@ -227,7 +243,18 @@ const localizePlan = (plan, lang) => {
         ...plan,
         name: localizedName,
         description: localizedDescription,
-        features: localizedFeatures
+        features: localizedFeatures,
+        billingPeriod: dictionaries[normalized]?.plans?.[String(plan.billingPeriod || '').toLowerCase()] || plan.billingPeriod
+    };
+};
+
+const localizeNotification = (notification, lang) => {
+    if (!notification || typeof notification !== 'object') return notification;
+    return {
+        ...notification,
+        title: translateRawMessage(lang, notification.title),
+        message: translateRawMessage(lang, notification.message),
+        body: translateRawMessage(lang, notification.body)
     };
 };
 
@@ -265,5 +292,6 @@ module.exports = {
     t,
     normalizeLang,
     localizePlan,
+    localizeNotification,
     translateRawMessage
 };

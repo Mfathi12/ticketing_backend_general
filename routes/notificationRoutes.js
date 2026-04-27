@@ -1,6 +1,7 @@
 const express = require('express');
 const { Notification } = require('../models');
 const { authenticateToken } = require('../middleware/auth');
+const { t, localizeNotification } = require('../utils/i18n');
 
 const router = express.Router();
 
@@ -14,7 +15,7 @@ router.get('/', authenticateToken, async (req, res) => {
         const userId = req.user._id;
         const activeCompanyId = req.companyId ? req.companyId.toString() : null;
         if (!activeCompanyId) {
-            return res.status(400).json({ message: 'Active company required' });
+            return res.status(400).json({ message: t(req.lang, 'notifications.active_company_required') });
         }
         const page = Math.max(1, parseInt(req.query.page) || 1);
         const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
@@ -35,7 +36,7 @@ router.get('/', authenticateToken, async (req, res) => {
         const unreadCount = await Notification.countDocuments({ user: userId, company: activeCompanyId, read: false });
 
         res.json({
-            notifications,
+            notifications: notifications.map((item) => localizeNotification(item, req.lang)),
             pagination: {
                 page,
                 limit,
@@ -60,7 +61,7 @@ router.patch('/read', authenticateToken, async (req, res) => {
         const userId = req.user._id;
         const activeCompanyId = req.companyId ? req.companyId.toString() : null;
         if (!activeCompanyId) {
-            return res.status(400).json({ message: 'Active company required' });
+            return res.status(400).json({ message: t(req.lang, 'notifications.active_company_required') });
         }
         const { ids, all } = req.body;
 
@@ -70,7 +71,7 @@ router.patch('/read', authenticateToken, async (req, res) => {
                 { read: true, readAt: new Date() }
             );
             return res.json({
-                message: 'All notifications marked as read',
+                message: t(req.lang, 'notifications.all_marked_read'),
                 modifiedCount: result.modifiedCount
             });
         }
@@ -81,13 +82,13 @@ router.patch('/read', authenticateToken, async (req, res) => {
                 { read: true, readAt: new Date() }
             );
             return res.json({
-                message: 'Notifications marked as read',
+                message: t(req.lang, 'notifications.marked_read'),
                 modifiedCount: result.modifiedCount
             });
         }
 
         return res.status(400).json({
-            message: 'Provide body.ids (array of notification ids) or body.all: true'
+            message: t(req.lang, 'notifications.ids_or_all_required')
         });
     } catch (error) {
         console.error('Mark notifications read error:', error);
@@ -105,7 +106,7 @@ router.patch('/:id/read', authenticateToken, async (req, res) => {
         const userId = req.user._id;
         const activeCompanyId = req.companyId ? req.companyId.toString() : null;
         if (!activeCompanyId) {
-            return res.status(400).json({ message: 'Active company required' });
+            return res.status(400).json({ message: t(req.lang, 'notifications.active_company_required') });
         }
 
         const notification = await Notification.findOneAndUpdate(
@@ -115,10 +116,10 @@ router.patch('/:id/read', authenticateToken, async (req, res) => {
         );
 
         if (!notification) {
-            return res.status(404).json({ message: 'Notification not found' });
+            return res.status(404).json({ message: t(req.lang, 'notifications.not_found') });
         }
 
-        res.json({ notification });
+        res.json({ notification: localizeNotification(notification.toObject(), req.lang) });
     } catch (error) {
         console.error('Mark notification read error:', error);
         res.status(500).json({ message: 'Internal server error' });
@@ -133,7 +134,7 @@ router.get('/unread-count', authenticateToken, async (req, res) => {
     try {
         const activeCompanyId = req.companyId ? req.companyId.toString() : null;
         if (!activeCompanyId) {
-            return res.status(400).json({ message: 'Active company required' });
+            return res.status(400).json({ message: t(req.lang, 'notifications.active_company_required') });
         }
         const count = await Notification.countDocuments({
             user: req.user._id,
