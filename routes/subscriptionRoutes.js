@@ -97,10 +97,10 @@ const getPaymobAuthToken = async () => {
 
 router.get('/plans', authenticateToken, async (_req, res) => {
     const lang =
-        _req.lang ||
         _req.query?.lang ||
         _req.headers['x-lang'] ||
         _req.headers['accept-language'] ||
+        _req.lang ||
         'en';
     const plans = await getLocalizedPlans(lang);
     res.json({ plans });

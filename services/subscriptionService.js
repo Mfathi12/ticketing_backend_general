@@ -1,5 +1,6 @@
 const { SubscriptionPlanContent } = require('../models');
 const { localizePlan, normalizeLang } = require('../utils/i18n');
+const hasArabicChars = (value) => /[\u0600-\u06FF]/.test(String(value || ''));
 
 const SUBSCRIPTION_PLANS = [
     {
@@ -199,13 +200,26 @@ const getLocalizedPlans = async (lang = 'en') => {
             const dbPlan = byId.get(plan.id);
             const tr = dbPlan?.translations?.[normalized];
             if (!tr) return localizePlan(plan, normalized);
-            return {
+            const localizedFromDb = {
                 ...plan,
                 name: tr.name || plan.name,
                 description: tr.description || plan.description,
                 billingPeriod: tr.billingPeriod || plan.billingPeriod,
                 features: Array.isArray(tr.features) && tr.features.length ? tr.features : plan.features
             };
+            // Safety fallback: if Arabic requested but DB row is stale/English, return trusted Arabic defaults.
+            if (normalized === 'ar') {
+                const payloadText = [
+                    localizedFromDb.name,
+                    localizedFromDb.description,
+                    localizedFromDb.billingPeriod,
+                    ...(localizedFromDb.features || [])
+                ].join(' ');
+                if (!hasArabicChars(payloadText)) {
+                    return localizePlan(plan, 'ar');
+                }
+            }
+            return localizedFromDb;
         });
     } catch (error) {
         console.error('Failed to load plan translations from DB, using defaults:', error.message);
