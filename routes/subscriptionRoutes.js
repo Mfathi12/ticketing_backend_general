@@ -392,9 +392,6 @@ router.post('/paymob/confirm', authenticateToken, async (req, res) => {
         if (!company) {
             return res.status(404).json({ message: t(req.lang, 'common.company_not_found') });
         }
-        if (company.subscription?.status !== 'pending' || !company.subscription?.pendingPlanId) {
-            return res.status(400).json({ message: t(req.lang, 'subscription.no_pending_subscription') });
-        }
 
         const { postPayUrl = '', success = false } = req.body || {};
         let successFlag = Boolean(success);
@@ -414,6 +411,24 @@ router.post('/paymob/confirm', authenticateToken, async (req, res) => {
 
         if (!successFlag) {
             return res.status(400).json({ message: t(req.lang, 'subscription.payment_not_successful') });
+        }
+
+        // Idempotency guard: if a previous confirm/webhook already activated plan,
+        // do not return an error on duplicate confirm attempts.
+        if (company.subscription?.status !== 'pending' || !company.subscription?.pendingPlanId) {
+            if ((company.subscription?.planId || 'free') !== 'free' && company.subscription?.status === 'active') {
+                return res.json({
+                    message: t(req.lang, 'subscription.subscription_already_active'),
+                    subscription: {
+                        planId: company.subscription.planId,
+                        status: company.subscription.status,
+                        expiresAt: company.subscription.expiresAt,
+                        graceEndsAt: company.subscription.graceEndsAt,
+                        paymobSubscriptionId: company.subscription.paymobSubscriptionId || null
+                    }
+                });
+            }
+            return res.status(400).json({ message: t(req.lang, 'subscription.no_pending_subscription') });
         }
 
         const selectedPlan = getPlanById(company.subscription.pendingPlanId);
