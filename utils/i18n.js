@@ -158,6 +158,26 @@ const rawMessageTranslations = {
         'Insufficient permissions': 'ليس لديك صلاحية كافية',
         'No version found': 'لا يوجد إصدار محفوظ',
         'Version is required': 'الإصدار مطلوب'
+        ,
+        'Invalid credentials': 'بيانات تسجيل الدخول غير صحيحة',
+        'Invalid credentials for existing user. Use your current account password to add another company.': 'بيانات المستخدم الحالي غير صحيحة. استخدم كلمة المرور الحالية لإضافة شركة جديدة.',
+        'This account cannot login with password': 'هذا الحساب لا يمكنه تسجيل الدخول بكلمة مرور',
+        'Email and password are required': 'البريد الإلكتروني وكلمة المرور مطلوبان',
+        'Login successful': 'تم تسجيل الدخول بنجاح',
+        'companyId is required: you belong to more than one company': 'معرّف الشركة مطلوب لأنك عضو في أكثر من شركة',
+        'You are not a member of the selected company': 'أنت لست عضوًا في الشركة المحددة',
+        'companyId is required': 'معرّف الشركة مطلوب',
+        'Company context updated': 'تم تحديث سياق الشركة',
+        'Email is required': 'البريد الإلكتروني مطلوب',
+        'OTP sent to your email': 'تم إرسال رمز التحقق إلى بريدك الإلكتروني',
+        'Email, OTP, and new password are required': 'البريد الإلكتروني ورمز التحقق وكلمة المرور الجديدة مطلوبة',
+        'OTP not found or expired': 'رمز التحقق غير موجود أو منتهي الصلاحية',
+        'OTP expired': 'رمز التحقق منتهي الصلاحية',
+        'Invalid OTP': 'رمز التحقق غير صحيح',
+        'Password reset successfully': 'تم إعادة تعيين كلمة المرور بنجاح',
+        'companyName, email and password are required': 'اسم الشركة والبريد الإلكتروني وكلمة المرور مطلوبة',
+        'Existing account has no password. Please reset password first, then create company.': 'الحساب الحالي لا يحتوي على كلمة مرور. أعد تعيين كلمة المرور أولاً ثم أنشئ الشركة.',
+        'Company registered successfully': 'تم تسجيل الشركة بنجاح'
     }
 };
 
