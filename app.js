@@ -14,6 +14,7 @@ const chatRoutes = require('./routes/chatRoutes');
 const attendanceRoutes = require('./routes/attendanceRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const subscriptionRoutes = require('./routes/subscriptionRoutes');
+const versionRoutes = require('./routes/versionRoutes');
 const {
     sendEightHourCheckoutReminders,
     processMidnightAttendanceRollover
@@ -606,6 +607,7 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/subscriptions', subscriptionRoutes);
+app.use('/api/version', versionRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {

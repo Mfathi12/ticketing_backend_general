@@ -4,6 +4,7 @@ const Ticket = require('./ticket');
 const { Conversation, Message } = require('./chat');
 const Notification = require('./notification');
 const Company = require('./company');
+const Version = require('./version');
 
 module.exports = {
     User,
@@ -12,5 +13,6 @@ module.exports = {
     Conversation,
     Message,
     Notification,
-    Company
+    Company,
+    Version
 };
