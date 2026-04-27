@@ -14,6 +14,7 @@ function dateStrInTimeZone(isoDate, timeZone) {
     }).format(isoDate);
 }
 
+
 /** YYYY-MM-DD for "now" in attendance timezone */
 function getAttendanceTodayString(d = new Date()) {
     return dateStrInTimeZone(d, ATTENDANCE_TIMEZONE);
