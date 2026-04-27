@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const { User, Company } = require('../models');
 const { evaluateAndSyncCompanySubscription } = require('../services/subscriptionService');
+const { t } = require('../utils/i18n');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 
@@ -76,8 +77,8 @@ const authenticateToken = async (req, res, next) => {
             }
             const state = await evaluateAndSyncCompanySubscription(company);
             req.subscriptionState = state;
-            if (state.notice) {
-                res.setHeader('x-subscription-notice', state.notice);
+            if (state.noticeKey) {
+                res.setHeader('x-subscription-notice', t(req.lang, state.noticeKey, state.noticeParams || {}));
             }
         }
 

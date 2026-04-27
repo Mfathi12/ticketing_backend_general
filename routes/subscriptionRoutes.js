@@ -11,6 +11,7 @@ const {
     GRACE_PERIOD_DAYS,
     evaluateAndSyncCompanySubscription
 } = require('../services/subscriptionService');
+const { t, localizePlan } = require('../utils/i18n');
 
 const router = express.Router();
 
@@ -51,17 +52,18 @@ const buildBillingData = (company, user) => ({
 });
 
 router.get('/plans', authenticateToken, async (_req, res) => {
-    res.json({ plans: serializePlans() });
+    const lang = _req.lang || 'en';
+    res.json({ plans: serializePlans().map((plan) => localizePlan(plan, lang)) });
 });
 
 router.get('/me', authenticateToken, async (req, res) => {
     if (!req.companyId) {
-        return res.status(400).json({ message: 'Active company required' });
+        return res.status(400).json({ message: t(req.lang, 'common.active_company_required') });
     }
 
     const company = await Company.findById(req.companyId).select('subscription');
     if (!company) {
-        return res.status(404).json({ message: 'Company not found' });
+        return res.status(404).json({ message: t(req.lang, 'common.company_not_found') });
     }
 
     const state = await evaluateAndSyncCompanySubscription(company);
@@ -74,35 +76,35 @@ router.get('/me', authenticateToken, async (req, res) => {
         isTrial: Boolean(company.subscription?.isTrial),
         trialEndsAt: company.subscription?.trialEndsAt || null,
         gracePeriodDays: GRACE_PERIOD_DAYS,
-        notice: state.notice || null
+        notice: state.noticeKey ? t(req.lang, state.noticeKey, state.noticeParams || {}) : null
     });
 });
 
 router.post('/paymob/checkout', authenticateToken, async (req, res) => {
     try {
         if (!req.companyId) {
-            return res.status(400).json({ message: 'Active company required' });
+            return res.status(400).json({ message: t(req.lang, 'common.active_company_required') });
         }
         if (!canManageSubscription(req.companyMembership)) {
-            return res.status(403).json({ message: 'Insufficient permissions' });
+            return res.status(403).json({ message: t(req.lang, 'common.insufficient_permissions') });
         }
 
         const { planId, paymentMethod, name, email, phoneNumber, country } = req.body;
         const normalizedPaymentMethod = String(paymentMethod || 'card').toLowerCase();
         const targetPlan = getPlanById(planId);
         if (!targetPlan || targetPlan.id === 'free') {
-            return res.status(400).json({ message: 'Please select a paid plan' });
+            return res.status(400).json({ message: t(req.lang, 'subscription.select_paid_plan') });
         }
         if (!PAYMENT_METHOD_LIST.includes(normalizedPaymentMethod)) {
             return res.status(400).json({
-                message: 'Only card payment is supported',
+                message: t(req.lang, 'subscription.only_card_supported'),
                 allowedMethods: PAYMENT_METHOD_LIST
             });
         }
 
         const integrationId = getIntegrationIdForMethod(normalizedPaymentMethod, targetPlan.paymobIntegrationId);
         if (!integrationId) {
-            return res.status(400).json({ message: 'Plan is missing Paymob integration ID' });
+            return res.status(400).json({ message: t(req.lang, 'subscription.plan_missing_integration') });
         }
 
         const paymobApiUrl = process.env.PAYMOB_API_URL || 'https://accept.paymob.com/v1/intention';
@@ -110,12 +112,12 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         const paymobPublicKey = process.env.PAYMOB_PUBLIC_KEY;
         const paymobRedirectUrl = process.env.PAYMOB_REDIRECT_URL || 'http://localhost:3000/subscription';
         if (!paymobSecretKey || !paymobPublicKey) {
-            return res.status(500).json({ message: 'PAYMOB_SECRET_KEY and PAYMOB_PUBLIC_KEY are required' });
+            return res.status(500).json({ message: t(req.lang, 'subscription.paymob_keys_required') });
         }
 
         const company = await Company.findById(req.companyId).select('name email subscription');
         if (!company) {
-            return res.status(404).json({ message: 'Company not found' });
+            return res.status(404).json({ message: t(req.lang, 'common.company_not_found') });
         }
         const now = new Date();
         const currentPlanId = company.subscription?.planId || 'free';
@@ -129,7 +131,10 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
 
         if (hasUnexpiredSubscription && currentPlanId === targetPlan.id) {
             return res.status(400).json({
-                message: `You already have an active ${targetPlan.name} subscription until ${new Date(company.subscription.expiresAt).toISOString()}.`,
+                message: t(req.lang, 'subscription.already_active_until', {
+                    plan: localizePlan(targetPlan, req.lang).name,
+                    expiresAt: new Date(company.subscription.expiresAt).toISOString()
+                }),
                 planId: targetPlan.id,
                 expiresAt: company.subscription.expiresAt
             });
@@ -188,7 +193,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         const clientSecret = intentionRes?.data?.client_secret;
         if (!clientSecret) {
             return res.status(502).json({
-                message: 'Missing client_secret from Paymob response',
+                message: t(req.lang, 'subscription.missing_client_secret'),
                 details: intentionRes?.data || null
             });
         }
@@ -209,21 +214,28 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         const checkoutUrl = `https://accept.paymob.com/unifiedcheckout/?publicKey=${paymobPublicKey}&clientSecret=${clientSecret}`;
 
         res.json({
-            message: 'Paymob checkout created successfully',
+            message: t(req.lang, 'subscription.paymob_checkout_created'),
             checkoutUrl,
             paymentMethod: normalizedPaymentMethod,
             paymentDetails: intentionRes.data,
-            plan: {
+            plan: localizePlan({
                 id: targetPlan.id,
                 name: targetPlan.name,
+                description: targetPlan.description,
                 price: targetPlan.price,
-                currency: targetPlan.currency
-            }
+                currency: targetPlan.currency,
+                billingPeriod: targetPlan.billingPeriod,
+                features: targetPlan.features,
+                isPopular: targetPlan.isPopular,
+                isActive: targetPlan.isActive,
+                paymobIntegrationId: targetPlan.paymobIntegrationId,
+                trialDays: targetPlan.trialDays
+            }, req.lang)
         });
     } catch (error) {
         console.error('Paymob checkout error:', error?.response?.data || error.message);
         res.status(500).json({
-            message: 'Internal server error',
+            message: t(req.lang, 'common.internal_server_error'),
             error: error?.response?.data || error.message
         });
     }
@@ -259,11 +271,11 @@ router.post('/paymob/webhook', async (req, res) => {
             });
         }
         if (!company) {
-            return res.status(404).json({ message: 'Company not found' });
+            return res.status(404).json({ message: t(req.lang, 'common.company_not_found') });
         }
         const planId = payloadPlanId || company.subscription?.pendingPlanId;
         if (!planId) {
-            return res.status(400).json({ message: 'Missing planId and no pending plan found for company' });
+            return res.status(400).json({ message: t(req.lang, 'subscription.missing_plan_webhook') });
         }
 
         if (success) {
@@ -305,28 +317,28 @@ router.post('/paymob/webhook', async (req, res) => {
         }
 
         await company.save();
-        res.json({ message: 'Webhook processed' });
+        res.json({ message: t(req.lang, 'subscription.webhook_processed') });
     } catch (error) {
         console.error('Paymob webhook error:', error);
-        res.status(500).json({ message: 'Internal server error' });
+        res.status(500).json({ message: t(req.lang, 'common.internal_server_error') });
     }
 });
 
 router.post('/paymob/confirm', authenticateToken, async (req, res) => {
     try {
         if (!req.companyId) {
-            return res.status(400).json({ message: 'Active company required' });
+            return res.status(400).json({ message: t(req.lang, 'common.active_company_required') });
         }
         if (!canManageSubscription(req.companyMembership)) {
-            return res.status(403).json({ message: 'Insufficient permissions' });
+            return res.status(403).json({ message: t(req.lang, 'common.insufficient_permissions') });
         }
 
         const company = await Company.findById(req.companyId);
         if (!company) {
-            return res.status(404).json({ message: 'Company not found' });
+            return res.status(404).json({ message: t(req.lang, 'common.company_not_found') });
         }
         if (company.subscription?.status !== 'pending' || !company.subscription?.pendingPlanId) {
-            return res.status(400).json({ message: 'No pending subscription found to confirm' });
+            return res.status(400).json({ message: t(req.lang, 'subscription.no_pending_subscription') });
         }
 
         const { postPayUrl = '', success = false } = req.body || {};
@@ -341,12 +353,12 @@ router.post('/paymob/confirm', authenticateToken, async (req, res) => {
                 }
                 transactionId = parsed.searchParams.get('id') || null;
             } catch (_) {
-                return res.status(400).json({ message: 'Invalid postPayUrl' });
+                return res.status(400).json({ message: t(req.lang, 'subscription.invalid_post_pay_url') });
             }
         }
 
         if (!successFlag) {
-            return res.status(400).json({ message: 'Payment is not marked as successful' });
+            return res.status(400).json({ message: t(req.lang, 'subscription.payment_not_successful') });
         }
 
         const selectedPlan = getPlanById(company.subscription.pendingPlanId);
@@ -372,7 +384,7 @@ router.post('/paymob/confirm', authenticateToken, async (req, res) => {
         await company.save();
 
         return res.json({
-            message: 'Subscription activated successfully',
+            message: t(req.lang, 'subscription.subscription_activated'),
             subscription: {
                 planId: company.subscription.planId,
                 status: company.subscription.status,
@@ -382,7 +394,7 @@ router.post('/paymob/confirm', authenticateToken, async (req, res) => {
         });
     } catch (error) {
         console.error('Paymob confirm error:', error);
-        return res.status(500).json({ message: 'Internal server error' });
+        return res.status(500).json({ message: t(req.lang, 'common.internal_server_error') });
     }
 });
 

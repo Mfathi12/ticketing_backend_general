@@ -1,5 +1,6 @@
 const express = require('express');
 const Version = require('../models/version');
+const { t } = require('../utils/i18n');
 
 const router = express.Router();
 
@@ -9,7 +10,7 @@ const upsertVersionHandler = async (req, res) => {
         if (!version || !String(version).trim()) {
             return res.status(400).json({
                 success: false,
-                message: 'Version is required'
+                message: t(req.lang, 'version.version_required')
             });
         }
 
@@ -34,7 +35,7 @@ const upsertVersionHandler = async (req, res) => {
         console.error('Upsert version error:', error);
         return res.status(500).json({
             success: false,
-            message: 'Internal server error'
+            message: t(req.lang, 'common.internal_server_error')
         });
     }
 };
@@ -47,7 +48,7 @@ router.get('/', async (_req, res) => {
         if (!existing) {
             return res.status(404).json({
                 success: false,
-                message: 'No version found'
+                message: t(req.lang, 'version.no_version_found')
             });
         }
 
@@ -59,7 +60,7 @@ router.get('/', async (_req, res) => {
         console.error('Get version error:', error);
         return res.status(500).json({
             success: false,
-            message: 'Internal server error'
+            message: t(req.lang, 'common.internal_server_error')
         });
     }
 });

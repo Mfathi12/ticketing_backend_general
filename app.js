@@ -15,6 +15,7 @@ const attendanceRoutes = require('./routes/attendanceRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const subscriptionRoutes = require('./routes/subscriptionRoutes');
 const versionRoutes = require('./routes/versionRoutes');
+const { languageMiddleware } = require('./middleware/language');
 const {
     sendEightHourCheckoutReminders,
     processMidnightAttendanceRollover
@@ -161,6 +162,7 @@ app.set('userSockets', userSockets);
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(languageMiddleware);
 
 // Serve static files (uploaded images)
 const path = require('path');

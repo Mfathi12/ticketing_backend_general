@@ -224,7 +224,8 @@ const evaluateAndSyncCompanySubscription = async (company, now = new Date()) => 
             planId: currentPlanId,
             expiresAt,
             graceEndsAt,
-            notice: `Your subscription expired. Grace period ends in ${daysLeft} day(s).`
+            noticeKey: 'subscription.notice_grace',
+            noticeParams: { days: daysLeft }
         };
     }
 
@@ -243,7 +244,8 @@ const evaluateAndSyncCompanySubscription = async (company, now = new Date()) => 
         inGracePeriod: false,
         status: 'active',
         planId: 'free',
-        notice: 'Your grace period ended and your subscription has been downgraded to Free.'
+        noticeKey: 'subscription.notice_downgraded',
+        noticeParams: {}
     };
 };
 
