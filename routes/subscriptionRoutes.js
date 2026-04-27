@@ -4,6 +4,7 @@ const { authenticateToken } = require('../middleware/auth');
 const { Company } = require('../models');
 const {
     serializePlans,
+    getLocalizedPlans,
     getPlanById,
     getCompanyPlan,
     addDays,
@@ -96,7 +97,8 @@ const getPaymobAuthToken = async () => {
 
 router.get('/plans', authenticateToken, async (_req, res) => {
     const lang = _req.lang || 'en';
-    res.json({ plans: serializePlans().map((plan) => localizePlan(plan, lang)) });
+    const plans = await getLocalizedPlans(lang);
+    res.json({ plans });
 });
 
 router.get('/me', authenticateToken, async (req, res) => {

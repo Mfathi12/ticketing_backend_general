@@ -1,3 +1,6 @@
+const { SubscriptionPlanContent } = require('../models');
+const { localizePlan, normalizeLang } = require('../utils/i18n');
+
 const SUBSCRIPTION_PLANS = [
     {
         id: 'free',
@@ -96,6 +99,76 @@ const serializePlans = () =>
         paymobSubscriptionPlanId: plan.paymobSubscriptionPlanId,
         trialDays: plan.trialDays
     }));
+
+let plansSeedPromise = null;
+const ensurePlanTranslationsSeeded = async () => {
+    if (plansSeedPromise) return plansSeedPromise;
+    plansSeedPromise = (async () => {
+        const basePlans = serializePlans();
+        const existing = await SubscriptionPlanContent.find({
+            planId: { $in: basePlans.map((p) => p.id) }
+        })
+            .select('planId')
+            .lean();
+        const existingIds = new Set(existing.map((doc) => doc.planId));
+
+        const inserts = basePlans
+            .filter((plan) => !existingIds.has(plan.id))
+            .map((plan) => ({
+                planId: plan.id,
+                translations: {
+                    en: {
+                        name: localizePlan(plan, 'en').name,
+                        description: localizePlan(plan, 'en').description,
+                        billingPeriod: localizePlan(plan, 'en').billingPeriod,
+                        features: localizePlan(plan, 'en').features
+                    },
+                    ar: {
+                        name: localizePlan(plan, 'ar').name,
+                        description: localizePlan(plan, 'ar').description,
+                        billingPeriod: localizePlan(plan, 'ar').billingPeriod,
+                        features: localizePlan(plan, 'ar').features
+                    }
+                }
+            }));
+
+        if (inserts.length) {
+            await SubscriptionPlanContent.insertMany(inserts, { ordered: false });
+        }
+    })().catch((error) => {
+        plansSeedPromise = null;
+        throw error;
+    });
+    return plansSeedPromise;
+};
+
+const getLocalizedPlans = async (lang = 'en') => {
+    const normalized = normalizeLang(lang);
+    const basePlans = serializePlans();
+    try {
+        await ensurePlanTranslationsSeeded();
+        const dbPlans = await SubscriptionPlanContent.find({
+            planId: { $in: basePlans.map((p) => p.id) }
+        }).lean();
+        const byId = new Map(dbPlans.map((doc) => [doc.planId, doc]));
+
+        return basePlans.map((plan) => {
+            const dbPlan = byId.get(plan.id);
+            const tr = dbPlan?.translations?.[normalized];
+            if (!tr) return localizePlan(plan, normalized);
+            return {
+                ...plan,
+                name: tr.name || plan.name,
+                description: tr.description || plan.description,
+                billingPeriod: tr.billingPeriod || plan.billingPeriod,
+                features: Array.isArray(tr.features) && tr.features.length ? tr.features : plan.features
+            };
+        });
+    } catch (error) {
+        console.error('Failed to load plan translations from DB, using defaults:', error.message);
+        return basePlans.map((plan) => localizePlan(plan, normalized));
+    }
+};
 
 const canAddMembers = (company, currentMembersCount, membersToAdd = 1) => {
     const plan = getCompanyPlan(company);
@@ -258,6 +331,7 @@ module.exports = {
     getPlanById,
     getCompanyPlan,
     serializePlans,
+    getLocalizedPlans,
     canAddMembers,
     addDays,
     addMonths,

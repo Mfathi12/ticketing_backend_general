@@ -5,6 +5,7 @@ const { Conversation, Message } = require('./chat');
 const Notification = require('./notification');
 const Company = require('./company');
 const Version = require('./version');
+const SubscriptionPlanContent = require('./subscriptionPlanContent');
 
 module.exports = {
     User,
@@ -14,5 +15,6 @@ module.exports = {
     Message,
     Notification,
     Company,
-    Version
+    Version,
+    SubscriptionPlanContent
 };
