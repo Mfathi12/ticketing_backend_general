@@ -174,10 +174,6 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         if (!integrationId) {
             return res.status(400).json({ message: t(req.lang, 'subscription.plan_missing_integration') });
         }
-        if (!targetPlan.paymobSubscriptionPlanId) {
-            return res.status(400).json({ message: t(req.lang, 'subscription.plan_missing_subscription_plan_id') });
-        }
-
         const paymobApiUrl = process.env.PAYMOB_API_URL || 'https://accept.paymob.com/v1/intention';
         const paymobSecretKey = process.env.PAYMOB_SECRET_KEY;
         const paymobPublicKey = process.env.PAYMOB_PUBLIC_KEY;
@@ -192,6 +188,12 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         }
         const now = new Date();
         const currentPlanId = company.subscription?.planId || 'free';
+        const hasKnownPaymobSubscription = Boolean(
+            company.subscription?.paymobSubscriptionId &&
+            String(company.subscription.paymobSubscriptionId).trim() !== ''
+        );
+        const isFirstPaymentAttempt = !hasKnownPaymobSubscription && currentPlanId === 'free';
+        const subscriptionPlanId = targetPlan.paymobSubscriptionPlanId || null;
         const currentExpiry = company.subscription?.expiresAt
             ? new Date(company.subscription.expiresAt)
             : null;
@@ -211,6 +213,12 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
             });
         }
 
+        // First payment should not be blocked if Paymob subscription plan id isn't configured yet.
+        // In this case, checkout proceeds as normal payment and webhook/confirm can still activate plan.
+        if (!subscriptionPlanId && !isFirstPaymentAttempt) {
+            return res.status(400).json({ message: t(req.lang, 'subscription.plan_missing_subscription_plan_id') });
+        }
+
         const amountCents = amountToCents(targetPlan.price);
         const merchantOrderId = String(req.companyId);
         const billingData = {
@@ -221,15 +229,12 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
             country: country || 'EG'
         };
 
-        const intentionRes = await axios.post(
-            paymobApiUrl,
-            {
+        const intentionPayload = {
                 amount: amountCents,
                 currency: targetPlan.currency || 'EGP',
                 merchant_order_id: merchantOrderId,
                 redirection_url: paymobRedirectUrl,
                 payment_methods: [integrationId],
-                subscription_plan_id: targetPlan.paymobSubscriptionPlanId,
                 items: [
                     {
                         name: `${targetPlan.name} Subscription`,
@@ -253,7 +258,14 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
                     planId: targetPlan.id,
                     paymentMethod: normalizedPaymentMethod
                 }
-            },
+            };
+        if (subscriptionPlanId) {
+            intentionPayload.subscription_plan_id = subscriptionPlanId;
+        }
+
+        const intentionRes = await axios.post(
+            paymobApiUrl,
+            intentionPayload,
             {
                 headers: {
                     Authorization: `Token ${paymobSecretKey}`,
