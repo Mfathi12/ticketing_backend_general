@@ -70,6 +70,23 @@ const extractPaymobSubscriptionId = (payload) => {
     return found != null ? String(found) : null;
 };
 
+const extractSubscriptionIdFromUrl = (urlValue) => {
+    if (!urlValue || typeof urlValue !== 'string') return null;
+    try {
+        const parsed = new URL(urlValue);
+        const candidates = [
+            parsed.searchParams.get('subscription_id'),
+            parsed.searchParams.get('subscriptionId'),
+            parsed.searchParams.get('subscriptionv2_id'),
+            parsed.searchParams.get('sub_id')
+        ];
+        const found = candidates.find((value) => value && String(value).trim() !== '');
+        return found ? String(found) : null;
+    } catch (_) {
+        return null;
+    }
+};
+
 const getPaymobAuthToken = async () => {
     const now = Date.now();
     if (paymobAuthTokenCache.token && paymobAuthTokenCache.expiresAt > now + 10_000) {
@@ -257,7 +274,10 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
             ...(company.subscription || {}),
             status: 'pending',
             pendingPlanId: targetPlan.id,
-            paymobSubscriptionId: null,
+            paymobSubscriptionId:
+                extractPaymobSubscriptionId(intentionRes?.data) ||
+                company.subscription?.paymobSubscriptionId ||
+                null,
             paymobOrderId: String(
                 intentionRes?.data?.order?.id ||
                 intentionRes?.data?.order_id ||
@@ -416,6 +436,9 @@ router.post('/paymob/confirm', authenticateToken, async (req, res) => {
             }
         }
 
+        const paymobSubscriptionIdFromUrl = extractSubscriptionIdFromUrl(postPayUrl);
+        const paymobSubscriptionIdFromBody = extractPaymobSubscriptionId(req.body);
+
         if (!successFlag) {
             return res.status(400).json({ message: t(req.lang, 'subscription.payment_not_successful') });
         }
@@ -457,7 +480,8 @@ router.post('/paymob/confirm', authenticateToken, async (req, res) => {
             pendingPlanId: null,
             paymobTransactionId: transactionId || company.subscription?.paymobTransactionId || null,
             paymobSubscriptionId:
-                extractPaymobSubscriptionId(req.body) ||
+                paymobSubscriptionIdFromBody ||
+                paymobSubscriptionIdFromUrl ||
                 company.subscription?.paymobSubscriptionId ||
                 null,
             updatedAt: new Date()
@@ -500,7 +524,25 @@ router.post('/paymob/cancel', authenticateToken, async (req, res) => {
         ).trim();
 
         if (!paymobSubscriptionId) {
-            return res.status(400).json({ message: t(req.lang, 'subscription.missing_paymob_subscription_id') });
+            // First-time edge case: payment may be active but webhook/confirm payload didn't include subscription id yet.
+            // Do not block user with hard error; cancel locally and let backend sync when id becomes available.
+            company.subscription = {
+                ...(company.subscription || {}),
+                status: 'cancelled',
+                pendingPlanId: null,
+                updatedAt: new Date()
+            };
+            await company.save();
+            return res.json({
+                message: t(req.lang, 'subscription.cancelled_successfully'),
+                subscription: {
+                    planId: company.subscription.planId,
+                    status: company.subscription.status,
+                    expiresAt: company.subscription.expiresAt || null,
+                    graceEndsAt: company.subscription.graceEndsAt || null,
+                    paymobSubscriptionId: company.subscription.paymobSubscriptionId || null
+                }
+            });
         }
 
         const authToken = await getPaymobAuthToken();
