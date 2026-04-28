@@ -6,7 +6,8 @@
   "scripts": {
     "start": "nodemon app.js",
     "seed": "node scripts/seed.js",
-    "fix-indexes": "node scripts/fixTicketIndexes.js"
+    "fix-indexes": "node scripts/fixTicketIndexes.js",
+    "test": "node --test"
   },
   "keywords": [],
   "author": "",
