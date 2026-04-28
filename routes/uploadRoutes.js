@@ -6,25 +6,14 @@ const path = require('path');
 const router = express.Router();
 
 // Upload images for tickets
-router.post('/ticket-images', authenticateToken, uploadMultiple, (req, res) => {
+router.post('/ticket-images', authenticateToken, (req, res) => {
     try {
-        if (!req.files || req.files.length === 0) {
-            return res.status(400).json({ 
-                success: false,
-                message: 'No images uploaded' 
-            });
-        }
-
-        // Generate URLs for uploaded files
-        const imageUrls = req.files.map(file => {
-            // Return relative URL that will be served as static file
-            return `/uploads/tickets/${file.filename}`;
-        });
+        const { images } = req.body;
 
         res.json({
             success: true,
             message: 'Images uploaded successfully',
-            images: imageUrls,
+            images: images,
             count: imageUrls.length
         });
     } catch (error) {

@@ -812,17 +812,40 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
         }
         const { conversationId } = req.body;
         const file = req.files && req.files[0]; // Get first file from array
+        const bodyType = String(req.body?.type || '').trim().toLowerCase();
+        const bodyFileUrl = String(req.body?.fileUrl || '').trim();
+        const bodyFileName = String(req.body?.fileName || '').trim();
+        const bodyFileSize = Number(req.body?.fileSize || 0) || undefined;
+        const bodyMimeType = String(req.body?.mimeType || '').trim() || undefined;
 
-        if (!conversationId || !file) {
-            return res.status(400).json({ message: 'Conversation ID and file are required' });
+        if (!conversationId) {
+            return res.status(400).json({ message: 'Conversation ID is required' });
         }
 
-        // Use image type when mimetype is image (even if sent as "file") so UI displays as image
-        const rawType = file.fieldname;
-        const type = (rawType === 'file' && file.mimetype && file.mimetype.startsWith('image/')) ? 'image' : rawType;
+        // Supports 2 modes:
+        // 1) multipart upload with real file (existing behavior)
+        // 2) JSON body with fileUrl + fileName (Flutter/remote-storage behavior)
+        let type = bodyType;
+        let fileUrl = bodyFileUrl;
+        let fileName = bodyFileName;
+        let fileSize = bodyFileSize;
+        let mimeType = bodyMimeType;
+
+        if (file) {
+            // Use image type when mimetype is image (even if sent as "file") so UI displays as image
+            const rawType = file.fieldname;
+            type = (rawType === 'file' && file.mimetype && file.mimetype.startsWith('image/')) ? 'image' : rawType;
+            fileUrl = `/uploads/chat/${type}/${file.filename}`;
+            fileName = file.originalname;
+            fileSize = file.size;
+            mimeType = file.mimetype;
+        }
 
         if (!['voice', 'image', 'video', 'file'].includes(type)) {
             return res.status(400).json({ message: 'Invalid message type' });
+        }
+        if (!fileUrl || !fileName) {
+            return res.status(400).json({ message: 'fileUrl and fileName are required when sending file metadata' });
         }
 
         // Verify user is part of the conversation
@@ -835,9 +858,6 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
             return res.status(403).json({ message: 'Access denied' });
         }
 
-        // File is stored in folder by multer (image folder when type is image)
-        const fileUrl = `/uploads/chat/${type}/${file.filename}`;
-
         // Create message
         const message = new Message({
             company: activeCompanyId,
@@ -847,10 +867,10 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
             senderEmail: req.user.email,
             type: type,
             fileUrl: fileUrl,
-            fileName: file.originalname,
-            fileSize: file.size,
-            mimeType: file.mimetype,
-            content: type === 'image' ? file.originalname : undefined, // Optional content for images
+            fileName: fileName,
+            fileSize: fileSize,
+            mimeType: mimeType,
+            content: type === 'image' ? fileName : undefined, // Optional content for images
             replyTo: req.body.replyTo || undefined, // Support replies for files too
         });
 
@@ -893,9 +913,9 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
                             },
                             type: type,
                             fileUrl: fileUrl,
-                            fileName: file.originalname,
-                            fileSize: file.size,
-                            mimeType: file.mimetype,
+                            fileName: fileName,
+                            fileSize: fileSize,
+                            mimeType: mimeType,
                             createdAt: message.createdAt
                         },
                         timestamp: new Date()
@@ -923,7 +943,7 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
                     company: activeCompanyId,
                     type: 'chat_message',
                     title: `New ${fileLabel} from ${senderName}`,
-                    body: file.originalname || fileLabel,
+                    body: fileName || fileLabel,
                     data: { conversationId: String(conversationId) }
                 });
             }
