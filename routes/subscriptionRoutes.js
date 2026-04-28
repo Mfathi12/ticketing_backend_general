@@ -270,6 +270,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
             });
         }
 
+        
         company.subscription = {
             ...(company.subscription || {}),
             status: 'pending',
