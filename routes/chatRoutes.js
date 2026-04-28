@@ -17,6 +17,25 @@ const membershipCompanyId = (entry) => {
     return String(raw);
 };
 
+const normalizeIncomingFileUrl = (rawUrl) => {
+    const input = String(rawUrl || '').trim();
+    if (!input) return '';
+
+    // If already relative, keep it and ensure leading slash.
+    if (!/^https?:\/\//i.test(input)) {
+        return input.startsWith('/') ? input : `/${input}`;
+    }
+
+    // For absolute URLs, store path only (without protocol/host/base).
+    try {
+        const parsed = new URL(input);
+        const pathOnly = `${parsed.pathname || ''}${parsed.search || ''}`;
+        return pathOnly.startsWith('/') ? pathOnly : `/${pathOnly}`;
+    } catch (_) {
+        return input;
+    }
+};
+
 // Derive file extension from mimetype when missing (e.g. images from some clients)
 const getExtFromMimetype = (mimetype, fieldname) => {
     if (!mimetype) return '';
@@ -813,9 +832,9 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
         const { conversationId } = req.body;
         const file = req.files && req.files[0]; // Get first file from array
         const bodyType = String(req.body?.type || '').trim().toLowerCase();
-        const bodyFileUrl = String(req.body?.fileUrl || '').trim();
+        const bodyFileUrl = normalizeIncomingFileUrl(req.body?.fileUrl);
         const bodyFileName = String(req.body?.fileName || '').trim();
-        const bodyFileSize = Number(req.body?.fileSize || 0) || undefined;
+        const bodyFileSize = req.body?.fileSize != null ? (Number(req.body.fileSize) || undefined) : undefined;
         const bodyMimeType = String(req.body?.mimeType || '').trim() || undefined;
 
         if (!conversationId) {
