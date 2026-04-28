@@ -213,11 +213,9 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
             });
         }
 
-        // First payment should not be blocked if Paymob subscription plan id isn't configured yet.
-        // In this case, checkout proceeds as normal payment and webhook/confirm can still activate plan.
-        if (!subscriptionPlanId && !isFirstPaymentAttempt) {
-            return res.status(400).json({ message: t(req.lang, 'subscription.plan_missing_subscription_plan_id') });
-        }
+        // Do not block checkout when subscription_plan_id is missing.
+        // Payment can still proceed and subscription/paymobSubscriptionId can be captured
+        // later from webhook/confirm when available.
 
         const amountCents = amountToCents(targetPlan.price);
         const merchantOrderId = String(req.companyId);
