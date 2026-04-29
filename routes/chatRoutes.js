@@ -36,6 +36,29 @@ const normalizeIncomingFileUrl = (rawUrl) => {
     }
 };
 
+const getRequestBaseUrl = (req) => {
+    const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+    const protocol = forwardedProto || req.protocol || 'http';
+    return `${protocol}://${req.get('host')}`;
+};
+
+const toAbsoluteFileUrl = (req, fileUrl) => {
+    const input = String(fileUrl || '').trim();
+    if (!input) return input;
+    if (/^https?:\/\//i.test(input)) return input;
+    const normalized = input.startsWith('/') ? input : `/${input}`;
+    return `${getRequestBaseUrl(req)}${normalized}`;
+};
+
+const hydrateMessageFileUrl = (req, messageDoc) => {
+    if (!messageDoc || !messageDoc.fileUrl) return messageDoc;
+    const message = messageDoc.toObject ? messageDoc.toObject() : { ...messageDoc };
+    message.fileUrl = toAbsoluteFileUrl(req, message.fileUrl);
+    return message;
+};
+
+const hydrateMessagesFileUrls = (req, messages = []) => messages.map((message) => hydrateMessageFileUrl(req, message));
+
 // Derive file extension from mimetype when missing (e.g. images from some clients)
 const getExtFromMimetype = (mimetype, fieldname) => {
     if (!mimetype) return '';
@@ -356,8 +379,12 @@ router.get('/conversations', authenticateToken, async (req, res) => {
         // Get unread count for each conversation
         const conversationsWithUnread = conversations.map(conv => {
             const unread = conv.unreadCount.get(req.user._id.toString()) || 0;
+            const conversationObj = conv.toObject();
+            if (conversationObj.lastMessage?.fileUrl) {
+                conversationObj.lastMessage.fileUrl = toAbsoluteFileUrl(req, conversationObj.lastMessage.fileUrl);
+            }
             return {
-                ...conv.toObject(),
+                ...conversationObj,
                 unreadCount: unread
             };
         });
@@ -425,7 +452,7 @@ router.get('/conversation/:conversationId/messages', authenticateToken, async (r
         await conversation.save();
 
         res.json({
-            messages: messages.reverse(), // Reverse to show oldest first
+            messages: hydrateMessagesFileUrls(req, messages.reverse()), // Reverse to show oldest first
             hasMore: messages.length === limit
         });
     } catch (error) {
@@ -760,7 +787,7 @@ router.post('/message/:messageId/thread', authenticateToken, async (req, res) =>
         }
 
         res.status(201).json({
-            message: threadReply,
+            message: hydrateMessageFileUrl(req, threadReply),
             threadCount: parentMessage.threadCount
         });
     } catch (error) {
@@ -811,8 +838,8 @@ router.get('/message/:messageId/thread', authenticateToken, async (req, res) => 
             .sort({ createdAt: 1 }); // Oldest first in threads
 
         res.json({
-            parentMessage,
-            threadReplies,
+            parentMessage: hydrateMessageFileUrl(req, parentMessage),
+            threadReplies: hydrateMessagesFileUrls(req, threadReplies),
             threadCount: threadReplies.length
         });
     } catch (error) {
@@ -931,7 +958,7 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
                                 email: req.user.email
                             },
                             type: type,
-                            fileUrl: fileUrl,
+                            fileUrl: toAbsoluteFileUrl(req, fileUrl),
                             fileName: fileName,
                             fileSize: fileSize,
                             mimeType: mimeType,
@@ -970,7 +997,7 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
             console.error('FCM error for chat file message:', fcmError);
         }
 
-        res.status(201).json({ message });
+        res.status(201).json({ message: hydrateMessageFileUrl(req, message) });
     } catch (error) {
         console.error('Send file message error:', error);
         res.status(500).json({ message: 'Internal server error' });
