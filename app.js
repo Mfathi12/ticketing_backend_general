@@ -1,7 +1,12 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const dns = require('dns');
 require('dotenv').config();
+
+// Atlas SRV lookups can intermittently fail on some Windows/DNS setups.
+// Prefer IPv4 result ordering to reduce querySrv instability.
+dns.setDefaultResultOrder('ipv4first');
 
 // Import routes
 const authRoutes = require('./routes/authRoutes');
@@ -624,7 +629,12 @@ const mongoUri = process.env.MONGODB_URI;
 if (!mongoUri) {
     console.error('MONGODB_URI is not set');
 } else {
-    mongoose.connect(mongoUri).catch((error) => {
+    mongoose.connect(mongoUri, {
+        serverSelectionTimeoutMS: 15000,
+        socketTimeoutMS: 45000,
+        family: 4,
+        maxPoolSize: 10
+    }).catch((error) => {
         console.error('MongoDB connection failed:', error.message);
     });
 }

@@ -26,7 +26,12 @@ const waitForDbReady = async (timeoutMs = 4000) => {
     if (conn.readyState === 0 && mongoUri) {
         // In serverless/cold starts, connection might not be started yet.
         try {
-            await mongoose.connect(mongoUri);
+            await mongoose.connect(mongoUri, {
+                serverSelectionTimeoutMS: 15000,
+                socketTimeoutMS: 45000,
+                family: 4,
+                maxPoolSize: 10
+            });
             return true;
         } catch (_) {
             // fallback to timed wait below
@@ -57,7 +62,7 @@ const waitForDbReady = async (timeoutMs = 4000) => {
 };
 
 const ensureDbConnected = async (res) => {
-    const ok = await waitForDbReady(5000);
+    const ok = await waitForDbReady(15000);
     if (!ok) {
         res.status(503).json({
             message: 'Database is temporarily unavailable. Please try again in a moment.'
