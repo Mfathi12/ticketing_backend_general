@@ -6,6 +6,7 @@ const getRequestBaseUrl = (req) => {
     return host ? `${protocol}://${host}` : '';
 };
 
+
 const normalizeBaseUrl = (raw) => String(raw || '').trim().replace(/\/+$/, '');
 
 const getConfiguredMediaBaseUrl = () => normalizeBaseUrl(
