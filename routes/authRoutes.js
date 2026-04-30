@@ -277,6 +277,7 @@ router.post('/login', async (req, res) => {
             }
         }
 
+        
         const companyIds = (user.companies || [])
             .map((entry) => normalizeCompanyId(entry))
             .filter((id) => id && mongoose.Types.ObjectId.isValid(id));
