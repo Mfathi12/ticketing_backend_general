@@ -25,6 +25,76 @@ const PAYMOB_BASE_URL = process.env.PAYMOB_BASE_URL || 'https://accept.paymob.co
 let paymobAuthTokenCache = { token: null, expiresAt: 0 };
 const PLAN_RANK = { free: 0, basic: 1, pro: 2 };
 
+/** Origins allowed for Paymob return after checkout (prevents open redirects). */
+const addRedirectOrigin = (set, raw) => {
+    if (!raw || typeof raw !== 'string') return;
+    const s = raw.trim();
+    if (!s) return;
+    try {
+        const normalized = /^https?:\/\//i.test(s) ? s : `https://${s}`;
+        set.add(new URL(normalized).origin);
+    } catch (_) {
+        /* ignore */
+    }
+};
+
+const getAllowedPaymobReturnOrigins = () => {
+    const origins = new Set();
+    addRedirectOrigin(origins, process.env.PAYMOB_REDIRECT_URL);
+    String(process.env.ALLOWED_PAYMOB_RETURN_ORIGINS || '')
+        .split(',')
+        .map((x) => x.trim())
+        .filter(Boolean)
+        .forEach((x) => addRedirectOrigin(origins, x));
+    return origins;
+};
+
+/**
+ * Paymob redirects the browser here after payment. Must match the deployed frontend
+ * (e.g. Netlify). Optional body.returnUrl is used when its origin is allow-listed.
+ */
+const resolvePaymobRedirectionUrl = (req) => {
+    const fallback = process.env.PAYMOB_REDIRECT_URL || 'http://localhost:3000/subscription';
+    const allowed = getAllowedPaymobReturnOrigins();
+    const requested = String(req.body?.returnUrl || '').trim();
+    if (!requested) return fallback;
+    try {
+        const u = new URL(requested);
+        const path = (u.pathname || '').replace(/\/+$/, '') || '/';
+        if (path !== '/subscription') return fallback;
+        if (!allowed.has(u.origin)) return fallback;
+        return `${u.origin}/subscription`;
+    } catch (_) {
+        return fallback;
+    }
+};
+
+/** Parse success flag from Paymob redirect URL (query and/or hash). */
+const parsePaymobSuccessFromUrl = (urlString) => {
+    if (!urlString || typeof urlString !== 'string') return false;
+    try {
+        const u = new URL(urlString);
+        const tryParam = (value) => {
+            if (value == null) return null;
+            const v = String(value).toLowerCase();
+            if (v === 'true' || v === '1' || v === 'yes') return true;
+            if (v === 'false' || v === '0' || v === 'no') return false;
+            return null;
+        };
+        const fromSearch = tryParam(u.searchParams.get('success'));
+        if (fromSearch !== null) return fromSearch;
+        if (u.hash && u.hash.length > 1) {
+            const h = u.hash.startsWith('#') ? u.hash.slice(1) : u.hash;
+            const hp = new URLSearchParams(h.startsWith('?') ? h.slice(1) : h);
+            const fromHash = tryParam(hp.get('success'));
+            if (fromHash !== null) return fromHash;
+        }
+    } catch (_) {
+        /* ignore */
+    }
+    return false;
+};
+
 const getIntegrationIdForMethod = (paymentMethod, fallbackId) => {
     const method = String(paymentMethod || '').trim().toLowerCase();
     if (method === 'card') {
@@ -183,7 +253,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         const paymobApiUrl = process.env.PAYMOB_API_URL || 'https://accept.paymob.com/v1/intention';
         const paymobSecretKey = process.env.PAYMOB_SECRET_KEY;
         const paymobPublicKey = process.env.PAYMOB_PUBLIC_KEY;
-        const paymobRedirectUrl = process.env.PAYMOB_REDIRECT_URL || 'http://localhost:3000/subscription';
+        const paymobRedirectUrl = resolvePaymobRedirectionUrl(req);
         if (!paymobSecretKey || !paymobPublicKey) {
             return res.status(500).json({ message: t(req.lang, 'subscription.paymob_keys_required') });
         }
@@ -451,11 +521,13 @@ router.post('/paymob/confirm', authenticateToken, async (req, res) => {
         if (postPayUrl && typeof postPayUrl === 'string') {
             try {
                 const parsed = new URL(postPayUrl);
-                const successParam = parsed.searchParams.get('success');
-                if (successParam != null) {
-                    successFlag = String(successParam).toLowerCase() === 'true';
-                }
+                successFlag = successFlag || parsePaymobSuccessFromUrl(postPayUrl);
                 transactionId = parsed.searchParams.get('id') || null;
+                if (!transactionId && parsed.hash && parsed.hash.length > 1) {
+                    const h = parsed.hash.startsWith('#') ? parsed.hash.slice(1) : parsed.hash;
+                    const hp = new URLSearchParams(h.startsWith('?') ? h.slice(1) : h);
+                    transactionId = hp.get('id') || transactionId;
+                }
             } catch (_) {
                 return res.status(400).json({ message: t(req.lang, 'subscription.invalid_post_pay_url') });
             }
