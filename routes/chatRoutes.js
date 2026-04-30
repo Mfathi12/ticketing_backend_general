@@ -4,6 +4,7 @@ const { User, Project, Company } = require('../models');
 const { createNotification } = require('../services/notificationService');
 const { authenticateToken } = require('../middleware/auth');
 const { getCompanyPlan } = require('../services/subscriptionService');
+const { toAbsoluteMediaUrl } = require('../utils/mediaUrl');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -17,43 +18,16 @@ const membershipCompanyId = (entry) => {
     return String(raw);
 };
 
-const normalizeIncomingFileUrl = (rawUrl) => {
+const normalizeIncomingFileUrl = (req, rawUrl) => {
     const input = String(rawUrl || '').trim();
     if (!input) return '';
-
-    // If already relative, keep it and ensure leading slash.
-    if (!/^https?:\/\//i.test(input)) {
-        return input.startsWith('/') ? input : `/${input}`;
-    }
-
-    // For absolute URLs, store path only (without protocol/host/base).
-    try {
-        const parsed = new URL(input);
-        const pathOnly = `${parsed.pathname || ''}${parsed.search || ''}`;
-        return pathOnly.startsWith('/') ? pathOnly : `/${pathOnly}`;
-    } catch (_) {
-        return input;
-    }
-};
-
-const getRequestBaseUrl = (req) => {
-    const forwardedProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
-    const protocol = forwardedProto || req.protocol || 'http';
-    return `${protocol}://${req.get('host')}`;
-};
-
-const toAbsoluteFileUrl = (req, fileUrl) => {
-    const input = String(fileUrl || '').trim();
-    if (!input) return input;
-    if (/^https?:\/\//i.test(input)) return input;
-    const normalized = input.startsWith('/') ? input : `/${input}`;
-    return `${getRequestBaseUrl(req)}${normalized}`;
+    return toAbsoluteMediaUrl(input, req);
 };
 
 const hydrateMessageFileUrl = (req, messageDoc) => {
     if (!messageDoc || !messageDoc.fileUrl) return messageDoc;
     const message = messageDoc.toObject ? messageDoc.toObject() : { ...messageDoc };
-    message.fileUrl = toAbsoluteFileUrl(req, message.fileUrl);
+    message.fileUrl = toAbsoluteMediaUrl(message.fileUrl, req);
     return message;
 };
 
@@ -381,7 +355,7 @@ router.get('/conversations', authenticateToken, async (req, res) => {
             const unread = conv.unreadCount.get(req.user._id.toString()) || 0;
             const conversationObj = conv.toObject();
             if (conversationObj.lastMessage?.fileUrl) {
-                conversationObj.lastMessage.fileUrl = toAbsoluteFileUrl(req, conversationObj.lastMessage.fileUrl);
+                conversationObj.lastMessage.fileUrl = toAbsoluteMediaUrl(conversationObj.lastMessage.fileUrl, req);
             }
             return {
                 ...conversationObj,
@@ -757,7 +731,7 @@ router.post('/message/:messageId/thread', authenticateToken, async (req, res) =>
             senderEmail: req.user.email,
             type,
             content: content?.trim(),
-            fileUrl,
+            fileUrl: toAbsoluteMediaUrl(fileUrl, req),
             fileName,
             fileSize,
             mimeType,
@@ -859,7 +833,7 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
         const { conversationId } = req.body;
         const file = req.files && req.files[0]; // Get first file from array
         const bodyType = String(req.body?.type || '').trim().toLowerCase();
-        const bodyFileUrl = normalizeIncomingFileUrl(req.body?.fileUrl);
+        const bodyFileUrl = normalizeIncomingFileUrl(req, req.body?.fileUrl);
         const bodyFileName = String(req.body?.fileName || '').trim();
         const bodyFileSize = req.body?.fileSize != null ? (Number(req.body.fileSize) || undefined) : undefined;
         const bodyMimeType = String(req.body?.mimeType || '').trim() || undefined;
@@ -881,7 +855,7 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
             // Use image type when mimetype is image (even if sent as "file") so UI displays as image
             const rawType = file.fieldname;
             type = (rawType === 'file' && file.mimetype && file.mimetype.startsWith('image/')) ? 'image' : rawType;
-            fileUrl = `/uploads/chat/${type}/${file.filename}`;
+            fileUrl = toAbsoluteMediaUrl(`/uploads/chat/${type}/${file.filename}`, req);
             fileName = file.originalname;
             fileSize = file.size;
             mimeType = file.mimetype;
@@ -958,7 +932,7 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
                                 email: req.user.email
                             },
                             type: type,
-                            fileUrl: toAbsoluteFileUrl(req, fileUrl),
+                            fileUrl: toAbsoluteMediaUrl(fileUrl, req),
                             fileName: fileName,
                             fileSize: fileSize,
                             mimeType: mimeType,

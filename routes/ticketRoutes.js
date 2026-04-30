@@ -5,8 +5,31 @@ const { authenticateToken } = require('../middleware/auth');
 const { sendTicketNotification } = require('../services/emailService');
 const { processImages } = require('../utils/imageHelper');
 const { createNotification } = require('../services/notificationService');
+const { toAbsoluteMediaUrl, mapMediaUrls } = require('../utils/mediaUrl');
 
 const router = express.Router();
+
+const hydrateTicketMediaUrls = (req, ticketDoc) => {
+    if (!ticketDoc) return ticketDoc;
+    const ticket = ticketDoc.toObject ? ticketDoc.toObject() : { ...ticketDoc };
+    ticket.images = mapMediaUrls(ticket.images, req);
+
+    if (Array.isArray(ticket.replies)) {
+        ticket.replies = ticket.replies.map((reply) => ({
+            ...reply,
+            images: mapMediaUrls(reply.images, req)
+        }));
+    }
+
+    if (Array.isArray(ticket.allComments)) {
+        ticket.allComments = ticket.allComments.map((comment) => ({
+            ...comment,
+            images: mapMediaUrls(comment.images, req)
+        }));
+    }
+
+    return ticket;
+};
 
 
 // 8. Add new ticket
@@ -79,6 +102,9 @@ router.post('/add-ticket', authenticateToken, async (req, res) => {
             : [];
 
         // Create new ticket
+        const processedImages = images
+            ? (Array.isArray(images) ? processImages(images) : processImages([images]))
+            : [];
         const newTicket = new Ticket({
             company: activeCompanyId,
             project: projectId,
@@ -94,7 +120,7 @@ router.post('/add-ticket', authenticateToken, async (req, res) => {
             handler: normalizedHandler,
             status: status || 'open',
             priority: priority || undefined,
-            images: images ? (Array.isArray(images) ? processImages(images) : processImages([images])) : []
+            images: mapMediaUrls(processedImages, req)
         });
 
         await newTicket.save();
@@ -273,7 +299,7 @@ router.post('/add-ticket', authenticateToken, async (req, res) => {
 
         res.status(201).json({
             message: 'Ticket created successfully',
-            ticket: newTicket
+            ticket: hydrateTicketMediaUrls(req, newTicket)
         });
     } catch (error) {
         console.error('Add ticket error:', error);
@@ -368,9 +394,9 @@ router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
         if (images !== undefined) {
             // Process images - convert base64 to files if needed
             if (Array.isArray(images)) {
-                updateData.images = processImages(images);
+                updateData.images = mapMediaUrls(processImages(images), req);
             } else {
-                updateData.images = processImages([images]);
+                updateData.images = mapMediaUrls(processImages([images]), req);
             }
         }
         if (cc !== undefined) {
@@ -557,7 +583,7 @@ router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
 
         res.json({
             message: 'Ticket updated successfully',
-            ticket: updatedTicket
+            ticket: hydrateTicketMediaUrls(req, updatedTicket)
         });
     } catch (error) {
         console.error('Edit ticket error:', error);
@@ -590,9 +616,9 @@ router.post('/ticket/:ticketId/reply', authenticateToken, async (req, res) => {
         let processedImages = [];
         if (images) {
             if (Array.isArray(images)) {
-                processedImages = await processImages(images);
+                processedImages = processImages(images);
             } else {
-                processedImages = await processImages([images]);
+                processedImages = processImages([images]);
             }
         }
 
@@ -602,7 +628,7 @@ router.post('/ticket/:ticketId/reply', authenticateToken, async (req, res) => {
             userId: req.user._id,
             userEmail: req.user.email,
             comment: comment.trim(),
-            images: processedImages
+            images: mapMediaUrls(processedImages, req)
         };
 
         // Add reply to ticket
@@ -742,7 +768,10 @@ router.post('/ticket/:ticketId/reply', authenticateToken, async (req, res) => {
 
         res.status(201).json({
             message: 'Reply added successfully',
-            reply: addedReply
+            reply: {
+                ...addedReply.toObject(),
+                images: mapMediaUrls(addedReply.images, req)
+            }
         });
     } catch (error) {
         console.error('Add reply error:', error);
@@ -832,7 +861,7 @@ router.get('/my-active-tickets', authenticateToken, async (req, res) => {
         }).populate('project', 'project_name status');
 
         res.json({ 
-            tickets,
+            tickets: tickets.map((ticket) => hydrateTicketMediaUrls(req, ticket)),
             count: tickets.length 
         });
     } catch (error) {
@@ -932,7 +961,10 @@ router.get('/ticket/:ticketId/comments', authenticateToken, async (req, res) => 
                 status: ticket.status,
                 priority: ticket.priority
             },
-            comments: allComments,
+            comments: allComments.map((comment) => ({
+                ...comment,
+                images: mapMediaUrls(comment.images, req)
+            })),
             count: allComments.length
         });
     } catch (error) {
@@ -955,7 +987,7 @@ router.get('/:ticketId', authenticateToken, async (req, res) => {
             return res.status(404).json({ message: 'Ticket not found' });
         }
 
-        res.json({ ticket });
+        res.json({ ticket: hydrateTicketMediaUrls(req, ticket) });
     } catch (error) {
         console.error('Get ticket error:', error);
         res.status(500).json({ message: 'Internal server error' });
@@ -988,7 +1020,7 @@ router.get('/filter/status/:status', authenticateToken, async (req, res) => {
             });
         }
 
-        res.json({ tickets });
+        res.json({ tickets: tickets.map((ticket) => hydrateTicketMediaUrls(req, ticket)) });
     } catch (error) {
         console.error('Get tickets by status error:', error);
         res.status(500).json({ message: 'Internal server error' });
@@ -1009,7 +1041,7 @@ router.get('/', authenticateToken, async (req, res) => {
         }
 
         const tickets = await Ticket.find({ company: activeCompanyId });
-        res.json({ tickets });
+        res.json({ tickets: tickets.map((ticket) => hydrateTicketMediaUrls(req, ticket)) });
     } catch (error) {
         console.error('Get all tickets error:', error);
         res.status(500).json({ message: 'Internal server error' });
