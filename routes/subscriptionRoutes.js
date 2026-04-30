@@ -23,6 +23,7 @@ const amountToCents = (amount) => Math.round(Number(amount || 0) * 100);
 const PAYMENT_METHOD_LIST = ['card'];
 const PAYMOB_BASE_URL = process.env.PAYMOB_BASE_URL || 'https://accept.paymob.com';
 let paymobAuthTokenCache = { token: null, expiresAt: 0 };
+const PLAN_RANK = { free: 0, basic: 1, pro: 2 };
 
 const getIntegrationIdForMethod = (paymentMethod, fallbackId) => {
     const method = String(paymentMethod || '').trim().toLowerCase();
@@ -85,6 +86,11 @@ const extractSubscriptionIdFromUrl = (urlValue) => {
     } catch (_) {
         return null;
     }
+};
+
+const getPlanRank = (planId) => {
+    const key = String(planId || 'free').toLowerCase();
+    return PLAN_RANK[key] ?? 0;
 };
 
 const getPaymobAuthToken = async () => {
@@ -210,6 +216,17 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
                 }),
                 planId: targetPlan.id,
                 expiresAt: company.subscription.expiresAt
+            });
+        }
+
+        const isDowngradeAttempt =
+            currentPlanId !== 'free' &&
+            getPlanRank(targetPlan.id) < getPlanRank(currentPlanId);
+        if (isDowngradeAttempt) {
+            return res.status(400).json({
+                message: 'Downgrading to a lower plan is not allowed.',
+                currentPlanId,
+                requestedPlanId: targetPlan.id
             });
         }
 
@@ -367,11 +384,8 @@ router.post('/paymob/webhook', async (req, res) => {
 
         if (success) {
             const selectedPlan = getPlanById(planId);
-            const oldExpiry = company.subscription?.expiresAt
-                ? new Date(company.subscription.expiresAt)
-                : null;
-            // Renewal starts from old expiry so users do not gain extra days by delaying payment.
-            const renewalAnchor = oldExpiry || new Date();
+            // Always start a fresh monthly cycle from successful payment date.
+            const renewalAnchor = new Date();
             const expiresAt = addMonths(renewalAnchor, 1);
             const graceEndsAt = addDays(expiresAt, GRACE_PERIOD_DAYS);
 
@@ -473,8 +487,8 @@ router.post('/paymob/confirm', authenticateToken, async (req, res) => {
         }
 
         const selectedPlan = getPlanById(company.subscription.pendingPlanId);
-        const oldExpiry = company.subscription?.expiresAt ? new Date(company.subscription.expiresAt) : null;
-        const renewalAnchor = oldExpiry || new Date();
+        // Always start a fresh monthly cycle from successful payment date.
+        const renewalAnchor = new Date();
         const expiresAt = addMonths(renewalAnchor, 1);
         const graceEndsAt = addDays(expiresAt, GRACE_PERIOD_DAYS);
 
