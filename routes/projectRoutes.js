@@ -33,11 +33,17 @@ router.post('/add-project', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: 'Project name, start date, and estimated end date are required' });
         }
 
+        const incomingAssignedUsers = Array.isArray(assigned_users) ? assigned_users : [];
+        const creatorUserId = req.user?._id ? req.user._id.toString() : null;
+        const normalizedAssignedUsers = creatorUserId
+            ? Array.from(new Set([...incomingAssignedUsers.map((id) => id.toString()), creatorUserId]))
+            : incomingAssignedUsers.map((id) => id.toString());
+
         // Validate assigned users if provided
-        if (assigned_users && assigned_users.length > 0) {
-            const validUsers = await User.find({ _id: { $in: assigned_users } });
-            console.log(assigned_users);
-            if (validUsers.length !== assigned_users.length) {
+        if (normalizedAssignedUsers.length > 0) {
+            const validUsers = await User.find({ _id: { $in: normalizedAssignedUsers } });
+            console.log(normalizedAssignedUsers);
+            if (validUsers.length !== normalizedAssignedUsers.length) {
                 return res.status(400).json({ message: 'Some assigned users are invalid' });
             }
 
@@ -53,7 +59,7 @@ router.post('/add-project', authenticateToken, async (req, res) => {
             project_name,
             start_date: new Date(start_date),
             estimated_end_date: new Date(estimated_end_date),
-            assigned_users: assigned_users ,
+            assigned_users: normalizedAssignedUsers,
             company: activeCompanyId
         });
 
@@ -63,7 +69,7 @@ router.post('/add-project', authenticateToken, async (req, res) => {
         try {
             const projectConversation = new Conversation({
                 company: activeCompanyId,
-                participants: assigned_users || [],
+                participants: normalizedAssignedUsers,
                 isGroup: true,
                 groupName: project_name,
                 project: newProject._id,
