@@ -4,6 +4,11 @@ const { evaluateAndSyncCompanySubscription } = require('../services/subscription
 const { t } = require('../utils/i18n');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+/** Access token TTL (refresh extends session without re-login). */
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
+
+const signAccessToken = (payload) =>
+    jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
 
 const membershipCompanyId = (entry) => {
     if (!entry) return null;
@@ -106,5 +111,7 @@ module.exports = {
     authenticateToken,
     requireRole,
     resolveActiveCompany,
-    JWT_SECRET
+    JWT_SECRET,
+    JWT_EXPIRES_IN,
+    signAccessToken
 };

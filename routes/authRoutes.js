@@ -4,7 +4,7 @@ const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
 const { User, Company } = require('../models');
 const { sendOTPEmail } = require('../services/emailService');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, signAccessToken, JWT_SECRET } = require('../middleware/auth');
 const { getCompanyPlan, evaluateAndSyncCompanySubscription } = require('../services/subscriptionService');
 
 const router = express.Router();
@@ -195,15 +195,12 @@ router.post('/register-company', async (req, res) => {
         const companies = await Company.find({ _id: { $in: [company._id] } }).select('name email ownerUser');
         const companiesWithMembership = mapCompaniesWithMembership(ownerUser.companies || [], companies);
 
-        const token = jwt.sign(
-            {
-                userId: ownerUser._id,
-                email: ownerUser.email,
-                role: ownerUser.role,
-                companyId: company._id.toString()
-            },
-            JWT_SECRET
-        );
+        const token = signAccessToken({
+            userId: ownerUser._id,
+            email: ownerUser.email,
+            role: ownerUser.role,
+            companyId: company._id.toString()
+        });
 
         res.status(201).json({
             message: 'Company registered successfully',
@@ -315,7 +312,7 @@ router.post('/login', async (req, res) => {
             payload.companyId = activeCompanyId;
         }
 
-        const token = jwt.sign(payload, JWT_SECRET);
+        const token = signAccessToken(payload);
         const activeCompany = activeCompanyId
             ? await Company.findById(activeCompanyId).select('subscription')
             : null;
@@ -356,6 +353,68 @@ router.post('/login', async (req, res) => {
     }
 });
 
+/**
+ * Rotate access token using current Bearer (signature must be valid; expiry ignored).
+ * Frontend: POST /api/auth/refresh with Authorization: Bearer <token>
+ */
+router.post('/refresh', async (req, res) => {
+    try {
+        if (!(await ensureDbConnected(res))) return;
+
+        const authHeader = req.headers.authorization;
+        const token = authHeader && authHeader.split(' ')[1];
+        if (!token) {
+            return res.status(401).json({ message: 'Access token required' });
+        }
+
+        let decoded;
+        try {
+            decoded = jwt.verify(token, JWT_SECRET, { ignoreExpiration: true });
+        } catch (err) {
+            return res.status(403).json({ message: 'Invalid or expired token' });
+        }
+
+        if (!decoded.userId) {
+            return res.status(403).json({ message: 'Invalid token' });
+        }
+
+        if (typeof decoded.exp === 'number') {
+            const expiredMsAgo = Date.now() - decoded.exp * 1000;
+            if (expiredMsAgo > MAX_REFRESH_AFTER_EXPIRY_MS) {
+                return res.status(403).json({ message: 'Session expired. Please login again.' });
+            }
+        }
+
+        const user = await User.findById(decoded.userId).select('-password');
+        if (!user) {
+            return res.status(401).json({ message: 'User not found' });
+        }
+
+        const payload = {
+            userId: user._id,
+            email: user.email,
+            role: user.role
+        };
+
+        if (decoded.companyId != null && String(decoded.companyId).trim()) {
+            const cid = String(decoded.companyId).trim();
+            const ok = (user.companies || []).some((e) => normalizeCompanyId(e) === cid);
+            if (ok) {
+                payload.companyId = cid;
+            }
+        }
+
+        const newToken = signAccessToken(payload);
+        return res.json({
+            message: 'Token refreshed',
+            token: newToken
+        });
+    } catch (error) {
+        console.error('Refresh token error:', error);
+        return res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
 // Switch active company (new JWT with companyId)
 router.post('/switch-company', authenticateToken, async (req, res) => {
     try {
@@ -372,15 +431,12 @@ router.post('/switch-company', authenticateToken, async (req, res) => {
             return res.status(403).json({ message: 'You are not a member of this company' });
         }
 
-        const token = jwt.sign(
-            {
-                userId: req.user._id,
-                email: req.user.email,
-                role: req.user.role,
-                companyId: cid
-            },
-            JWT_SECRET
-        );
+        const token = signAccessToken({
+            userId: req.user._id,
+            email: req.user.email,
+            role: req.user.role,
+            companyId: cid
+        });
 
         res.json({
             message: 'Company context updated',
