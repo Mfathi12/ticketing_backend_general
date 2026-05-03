@@ -32,6 +32,31 @@ const {
 // Import database seeder
 const { seedDefaultAdmin } = require('./utils/seedDatabase');
 
+/** CORS: أضف في .env مثلاً CORS_ORIGINS=https://موقعك.netlify.app,http://localhost:5173 — فارغ أو * = السماح بأي Origin (مناسب للتطوير) */
+const resolveCorsOrigin = () => {
+    const raw = process.env.CORS_ORIGINS;
+    if (raw == null || String(raw).trim() === '' || String(raw).trim() === '*') {
+        return true;
+    }
+    const allowed = String(raw)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    return (requestOrigin, callback) => {
+        if (!requestOrigin) return callback(null, true);
+        if (allowed.includes(requestOrigin)) return callback(null, true);
+        callback(new Error('Not allowed by CORS'));
+    };
+};
+
+const corsOrigin = resolveCorsOrigin();
+const corsOptions = {
+    origin: corsOrigin,
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-lang', 'Range'],
+    credentials: true
+};
+
 const app = express();
 const port = process.env.PORT || 9091;
 
@@ -43,8 +68,9 @@ const server = http.createServer(app);
 const io = new Server(server, {
     path: '/socket.io/',
     cors: {
-        origin: "*", // Allow all origins (adjust for production)
-        methods: ["GET", "POST"],
+        // لا تستخدم origin: "*" مع credentials: true — غير صالح في المتصفحات
+        origin: corsOrigin,
+        methods: ['GET', 'POST'],
         credentials: true
     },
     transports: ['polling', 'websocket'],
@@ -167,7 +193,7 @@ app.set('io', io);
 app.set('userSockets', userSockets);
 
 // Middleware
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(languageMiddleware);
