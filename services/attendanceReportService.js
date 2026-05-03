@@ -47,6 +47,9 @@ async function getAttendancesForMonth(month, year, companyId) {
         .sort({ date: 1, checkIn: 1 });
 }
 
+const fmtCoord = (n) =>
+    n != null && Number.isFinite(Number(n)) ? String(Number(n)) : '';
+
 function rowToPlain(a) {
     const fmtTime = (d) => (d ? new Date(d).toLocaleTimeString() : '-');
     const u = a.user || {};
@@ -65,7 +68,11 @@ function rowToPlain(a) {
                 ? `${Math.floor(a.duration / 60)}h ${a.duration % 60}m`
                 : '',
         status: a.status || '-',
-        note: a.note || ''
+        note: a.note || '',
+        checkInLat: fmtCoord(a.checkInLatitude),
+        checkInLng: fmtCoord(a.checkInLongitude),
+        checkOutLat: fmtCoord(a.checkOutLatitude),
+        checkOutLng: fmtCoord(a.checkOutLongitude)
     };
 }
 
@@ -100,7 +107,11 @@ function buildSpreadsheetMlBuffer(rows) {
         'Duration (mins)',
         'Duration',
         'Status',
-        'Note'
+        'Note',
+        'Check-in lat',
+        'Check-in lng',
+        'Check-out lat',
+        'Check-out lng'
     ];
 
     const headerRow = spreadsheetMlRow(headers);
@@ -118,7 +129,11 @@ function buildSpreadsheetMlBuffer(rows) {
                 r.durationMins,
                 r.durationHhMm,
                 r.status,
-                r.note
+                r.note,
+                r.checkInLat,
+                r.checkInLng,
+                r.checkOutLat,
+                r.checkOutLng
             ])
         )
         .join('\n');
@@ -154,7 +169,11 @@ const generateMonthlyReport = async (month, year, companyId) => {
         { label: 'Duration (mins)', value: 'durationMins' },
         { label: 'Duration', value: 'durationHhMm' },
         { label: 'Status', value: 'status' },
-        { label: 'Note', value: 'note' }
+        { label: 'Note', value: 'note' },
+        { label: 'Check-in lat', value: 'checkInLat' },
+        { label: 'Check-in lng', value: 'checkInLng' },
+        { label: 'Check-out lat', value: 'checkOutLat' },
+        { label: 'Check-out lng', value: 'checkOutLng' }
     ];
 
     const json2csvParser = new Parser({ fields });

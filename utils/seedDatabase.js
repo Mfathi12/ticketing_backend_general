@@ -19,7 +19,9 @@ const seedDefaultAdmin = async () => {
             title: 'admin',
             email: 'admin@admin.com',
             password: hashedPassword,
-            role: 'admin'
+            role: 'admin',
+            emailVerified: true,
+            registrationEmailPending: false
         });
 
         await adminUser.save();

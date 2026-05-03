@@ -13,6 +13,41 @@ const { createNotification } = require('../services/notificationService');
 const { getAttendanceTodayString } = require('../services/attendanceDateUtils');
 const { rolloverStaleOpenSessionsForUser } = require('../services/attendanceReminderService');
 
+/**
+ * Read optional WGS84 coordinates from JSON body (latitude/longitude or lat/lng).
+ * @returns {{ ok: true, coords: { latitude: number, longitude: number } | null } | { ok: false, message: string }}
+ */
+const readOptionalLatLng = (body) => {
+    if (!body || typeof body !== 'object') {
+        return { ok: true, coords: null };
+    }
+    const latRaw = body.latitude ?? body.lat;
+    const lngRaw = body.longitude ?? body.lng ?? body.lon;
+    const hasLat = latRaw !== undefined && latRaw !== null && latRaw !== '';
+    const hasLng = lngRaw !== undefined && lngRaw !== null && lngRaw !== '';
+    if (!hasLat && !hasLng) {
+        return { ok: true, coords: null };
+    }
+    if (!hasLat || !hasLng) {
+        return {
+            ok: false,
+            message: 'Send both latitude and longitude together, or omit location.'
+        };
+    }
+    const latitude = typeof latRaw === 'number' ? latRaw : Number(latRaw);
+    const longitude = typeof lngRaw === 'number' ? lngRaw : Number(lngRaw);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        return { ok: false, message: 'Invalid latitude or longitude.' };
+    }
+    if (latitude < -90 || latitude > 90) {
+        return { ok: false, message: 'latitude must be between -90 and 90.' };
+    }
+    if (longitude < -180 || longitude > 180) {
+        return { ok: false, message: 'longitude must be between -180 and 180.' };
+    }
+    return { ok: true, coords: { latitude, longitude } };
+};
+
 /** Open session = checked in but not checked out yet (multiple sessions per day allowed after checkout) */
 const openSessionFilter = {
     $or: [{ checkOut: { $exists: false } }, { checkOut: null }]
@@ -75,6 +110,11 @@ router.post('/check-in', authenticateToken, async (req, res) => {
             });
         }
 
+        const loc = readOptionalLatLng(req.body);
+        if (!loc.ok) {
+            return res.status(400).json({ message: loc.message });
+        }
+
         const attendance = new Attendance({
             company: activeCompanyId,
             user: userId,
@@ -82,6 +122,10 @@ router.post('/check-in', authenticateToken, async (req, res) => {
             checkIn: new Date(),
             status: 'present'
         });
+        if (loc.coords) {
+            attendance.checkInLatitude = loc.coords.latitude;
+            attendance.checkInLongitude = loc.coords.longitude;
+        }
 
         await attendance.save();
 
@@ -115,12 +159,26 @@ router.post('/check-out', authenticateToken, async (req, res) => {
             return res.status(404).json({ message: 'No open check-in found.' });
         }
 
+        const loc = readOptionalLatLng(req.body);
+        if (!loc.ok) {
+            return res.status(400).json({ message: loc.message });
+        }
+
         const checkOutTime = new Date();
         const durationMs = checkOutTime - new Date(attendance.checkIn);
         const durationMins = Math.max(0, Math.floor(durationMs / 60000));
 
         attendance.checkOut = checkOutTime;
         attendance.duration = durationMins;
+        if (loc.coords) {
+            attendance.checkOutLatitude = loc.coords.latitude;
+            attendance.checkOutLongitude = loc.coords.longitude;
+        }
+
+        const checkoutNoteRaw = req.body?.note ?? req.body?.tasksDone;
+        if (checkoutNoteRaw != null && String(checkoutNoteRaw).trim() !== '') {
+            attendance.note = String(checkoutNoteRaw).trim().slice(0, 4000);
+        }
 
         // Optional logic: Mark as half-day if duration is less than X hours (e.g., 4 hours = 240 mins)
         // Leaving it as 'present' by default unless logic is strictly defined, or admin changes it.

@@ -145,6 +145,25 @@ ${action === 'replied' ? '\nNote: A new reply has been added to this ticket. Ple
     ]);
 };
 
+const sendRegistrationOTPEmail = async (email, otp, companyName) => {
+    const subject = 'Verify your email — company registration';
+    const safeName = companyName ? String(companyName).trim() : 'your company';
+    const html = `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+            <h2 style="color: #333;">Verify your email</h2>
+            <div style="background-color: #f5f5f5; padding: 20px; border-radius: 5px;">
+                <p>Thanks for registering <strong>${safeName}</strong>.</p>
+                <p>Your verification code is:</p>
+                <h1 style="color: #007bff; font-size: 32px; text-align: center;">${otp}</h1>
+                <p>This code expires in 10 minutes.</p>
+                <p style="font-size: 13px; color: #666;">If you did not create an account, you can ignore this message.</p>
+            </div>
+        </div>
+    `;
+    const text = `Verify your email for ${safeName}. Your code is: ${otp}. It expires in 10 minutes.`;
+    await sendEmail(email, subject, text, html);
+};
+
 const sendOTPEmail = async (email, otp) => {
     const subject = 'Password Reset OTP';
     const html = `
@@ -204,5 +223,6 @@ module.exports = {
     sendEmail,
     sendTicketNotification,
     sendOTPEmail,
+    sendRegistrationOTPEmail,
     sendUserInviteEmail
 };

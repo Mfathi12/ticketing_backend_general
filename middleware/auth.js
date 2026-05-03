@@ -67,6 +67,12 @@ const authenticateToken = async (req, res, next) => {
             return res.status(401).json({ message: 'Invalid token' });
         }
 
+        if (user.registrationEmailPending === true) {
+            return res.status(403).json({
+                message: 'Email not verified. Complete verification before using the API.'
+            });
+        }
+
         req.user = user;
         req.authPayload = decoded;
 

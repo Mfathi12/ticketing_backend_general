@@ -104,6 +104,8 @@ router.post('/add-account', authenticateToken, async (req, res) => {
                 title,
                 email: normalizedEmail,
                 role: companyRole,
+                emailVerified: true,
+                registrationEmailPending: false,
                 companies: [{
                     company: companyId,
                     companyRole,
@@ -455,6 +457,8 @@ router.post('/accept-invite', async (req, res) => {
         }
 
         user.password = await bcrypt.hash(password, 12);
+        user.emailVerified = true;
+        user.registrationEmailPending = false;
         user.invite = {
             tokenHash: null,
             expiresAt: null,

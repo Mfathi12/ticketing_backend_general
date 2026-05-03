@@ -28,6 +28,7 @@ const {
     sendEightHourCheckoutReminders,
     processMidnightAttendanceRollover
 } = require('./services/attendanceReminderService');
+const { purgeStaleUnverifiedAccounts } = require('./services/unverifiedAccountPurgeService');
 
 // Import database seeder
 const { seedDefaultAdmin } = require('./utils/seedDatabase');
@@ -111,6 +112,12 @@ io.use(async (socket, next) => {
             console.log(`Socket connection rejected: User not found (${decoded.userId})`);
             const error = new Error('User not found');
             error.data = { type: 'AUTH_ERROR', message: 'User not found' };
+            return next(error);
+        }
+
+        if (user.registrationEmailPending === true) {
+            const error = new Error('Email not verified');
+            error.data = { type: 'AUTH_ERROR', message: 'Email not verified' };
             return next(error);
         }
 
@@ -654,6 +661,10 @@ db.once('open', async () => {
         // Seed default admin user in persistent server only
         await seedDefaultAdmin();
 
+        purgeStaleUnverifiedAccounts().catch((err) =>
+            console.error('Unverified account purge (startup):', err)
+        );
+
         // Start periodic attendance reminder job after DB is connected
         const intervalMinutes = parseInt(process.env.ATTENDANCE_REMINDER_INTERVAL_MINUTES || '15', 10);
         const intervalMs = Math.max(intervalMinutes, 5) * 60 * 1000; // minimum 5 minutes
@@ -665,6 +676,8 @@ db.once('open', async () => {
                 .catch(err => console.error('Attendance midnight rollover error:', err));
             sendEightHourCheckoutReminders()
                 .catch(err => console.error('Attendance reminder interval error:', err));
+            purgeStaleUnverifiedAccounts()
+                .catch(err => console.error('Unverified account purge error:', err));
         }, intervalMs);
     }
 });

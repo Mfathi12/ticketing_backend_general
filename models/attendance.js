@@ -39,6 +39,20 @@ const attendanceSchema = new mongoose.Schema({
     note: {
         type: String
     },
+    /** Captured at check-in when the client sends coordinates (WGS84). */
+    checkInLatitude: {
+        type: Number
+    },
+    checkInLongitude: {
+        type: Number
+    },
+    /** Captured at check-out when the client sends coordinates (WGS84). */
+    checkOutLatitude: {
+        type: Number
+    },
+    checkOutLongitude: {
+        type: Number
+    },
     lastEditedBy: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User'

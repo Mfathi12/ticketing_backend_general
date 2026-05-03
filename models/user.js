@@ -18,6 +18,20 @@ const userSchema = new mongoose.Schema({
         lowercase: true,
         trim: true
     },
+    /**
+     * Present for accounts that completed email proof (invite, verify, etc.).
+     * Omitted on legacy users — auth does not require it for login.
+     */
+    emailVerified: {
+        type: Boolean
+    },
+    /**
+     * True only for brand-new owners created via POST /register-company until OTP is verified.
+     * Legacy and invited users omit this (or false) — they log in normally.
+     */
+    registrationEmailPending: {
+        type: Boolean
+    },
     password: {
         type: String,
         required: false,
