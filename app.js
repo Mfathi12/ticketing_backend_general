@@ -30,6 +30,7 @@ const {
 } = require('./services/attendanceReminderService');
 const { purgeStaleUnverifiedAccounts } = require('./services/unverifiedAccountPurgeService');
 
+
 // Import database seeder
 const { seedDefaultAdmin } = require('./utils/seedDatabase');
 
