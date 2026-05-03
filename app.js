@@ -4,6 +4,9 @@ const cors = require('cors');
 const dns = require('dns');
 require('dotenv').config();
 
+// Prefer public DNS resolvers for Atlas SRV lookups on some Windows setups.
+dns.setServers(['1.1.1.1', '8.8.8.8']);
+
 // Atlas SRV lookups can intermittently fail on some Windows/DNS setups.
 // Prefer IPv4 result ordering to reduce querySrv instability.
 dns.setDefaultResultOrder('ipv4first');

@@ -188,12 +188,13 @@ const getPaymobAuthToken = async () => {
     return token;
 };
 
-router.get('/plans', authenticateToken, async (_req, res) => {
+/** Public catalog (landing, marketing). No authenticateToken — must stay anonymous-friendly. */
+router.get('/plans', async (req, res) => {
     const lang =
-        _req.query?.lang ||
-        _req.headers['x-lang'] ||
-        _req.headers['accept-language'] ||
-        _req.lang ||
+        req.query?.lang ||
+        req.headers['x-lang'] ||
+        req.headers['accept-language'] ||
+        req.lang ||
         'en';
     const plans = await getLocalizedPlans(lang);
     res.json({ plans });

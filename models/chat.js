@@ -170,7 +170,6 @@ const conversationSchema = new mongoose.Schema({
 // Index for finding user conversations
 conversationSchema.index({ participants: 1 });
 conversationSchema.index({ lastMessageAt: -1 });
-conversationSchema.index({ project: 1 });
 
 // Ensure unique conversation between two users (for 1-on-1 chats)
 conversationSchema.index({ participants: 1 }, {

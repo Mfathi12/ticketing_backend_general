@@ -8,7 +8,6 @@ const { authenticateToken, signAccessToken, JWT_SECRET } = require('../middlewar
 const { getCompanyPlan, evaluateAndSyncCompanySubscription } = require('../services/subscriptionService');
 
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 
 // Store OTPs temporarily (in production, use Redis or database)
 const otpStore = new Map();
@@ -104,8 +103,8 @@ router.post('/register-company', async (req, res) => {
             return res.status(400).json({ message: 'companyName, email and password are required' });
         }
 
-        if (password.length < 6) {
-            return res.status(400).json({ message: 'Password must be at least 6 characters' });
+        if (password.length < 8) {
+            return res.status(400).json({ message: 'Password must be at least 8 characters' });
         }
 
         const normalizedEmail = email.toLowerCase().trim();

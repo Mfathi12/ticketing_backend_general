@@ -18,6 +18,13 @@ const membershipCompanyId = (entry) => {
     return String(raw);
 };
 
+/** Mongoose participant ids are ObjectIds; Array#includes fails across instances with the same id */
+const isConversationParticipant = (conversation, userId) => {
+    if (!conversation?.participants?.length || !userId) return false;
+    const uid = String(userId);
+    return conversation.participants.some((p) => String(p) === uid);
+};
+
 const normalizeIncomingFileUrl = (req, rawUrl) => {
     const input = String(rawUrl || '').trim();
     if (!input) return '';
@@ -386,7 +393,7 @@ router.get('/conversation/:conversationId/messages', authenticateToken, async (r
             return res.status(404).json({ message: 'Conversation not found' });
         }
 
-        if (!conversation.participants.includes(req.user._id)) {
+        if (!isConversationParticipant(conversation, req.user._id)) {
             return res.status(403).json({ message: 'Access denied' });
         }
 
@@ -454,7 +461,7 @@ router.post('/message', authenticateToken, async (req, res) => {
             return res.status(404).json({ message: 'Conversation not found' });
         }
 
-        if (!conversation.participants.includes(req.user._id)) {
+        if (!isConversationParticipant(conversation, req.user._id)) {
             return res.status(403).json({ message: 'Access denied' });
         }
 
@@ -718,7 +725,7 @@ router.post('/message/:messageId/thread', authenticateToken, async (req, res) =>
             return res.status(404).json({ message: 'Conversation not found' });
         }
 
-        if (!conversation.participants.includes(req.user._id)) {
+        if (!isConversationParticipant(conversation, req.user._id)) {
             return res.status(403).json({ message: 'Access denied' });
         }
 
@@ -795,7 +802,7 @@ router.get('/message/:messageId/thread', authenticateToken, async (req, res) => 
             return res.status(404).json({ message: 'Conversation not found' });
         }
 
-        if (!conversation.participants.includes(req.user._id)) {
+        if (!isConversationParticipant(conversation, req.user._id)) {
             return res.status(403).json({ message: 'Access denied' });
         }
 
@@ -874,7 +881,7 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
             return res.status(404).json({ message: 'Conversation not found' });
         }
 
-        if (!conversation.participants.includes(req.user._id)) {
+        if (!isConversationParticipant(conversation, req.user._id)) {
             return res.status(403).json({ message: 'Access denied' });
         }
 
