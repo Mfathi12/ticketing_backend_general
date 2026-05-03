@@ -214,6 +214,7 @@ router.get('/me', authenticateToken, async (req, res) => {
     const plan = getCompanyPlan(company);
     res.json({
         planId: plan.id,
+        limits: plan.limits || null,
         status: company.subscription?.status || 'active',
         expiresAt: company.subscription?.expiresAt || null,
         graceEndsAt: company.subscription?.graceEndsAt || null,
