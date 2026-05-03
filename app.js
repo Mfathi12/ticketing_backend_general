@@ -9,7 +9,7 @@ require('dotenv').config();
 
 // Atlas SRV lookups can intermittently fail on some Windows/DNS setups.
 // Prefer IPv4 result ordering to reduce querySrv instability.
-dns.setDefaultResultOrder('ipv4first');
+
 
 // Import routes
 const authRoutes = require('./routes/authRoutes');
