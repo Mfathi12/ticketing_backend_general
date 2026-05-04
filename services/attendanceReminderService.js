@@ -10,6 +10,7 @@ const {
 // 8 hours in milliseconds
 const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
 
+
 /**
  * If a user stayed checked in past midnight, close the previous day at end of day
  * (hours recorded for that day), then auto create check-in at start of the next day.
