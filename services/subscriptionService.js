@@ -12,6 +12,7 @@ const SUBSCRIPTION_PLANS = [
         billingPeriod: 'monthly',
         features: [
             'Up to 3 accounts',
+            'Up to 3 projects',
             'No chat images, videos, or files',
             'No attendance edit or download'
         ],
@@ -21,6 +22,7 @@ const SUBSCRIPTION_PLANS = [
         trialDays: 0,
         limits: {
             maxMembers: 3,
+            maxProjects: 3,
             canUploadChatAttachments: false,
             canEditAttendance: false,
             canDownloadAttendanceReport: false
@@ -35,6 +37,7 @@ const SUBSCRIPTION_PLANS = [
         billingPeriod: 'monthly',
         features: [
             'From 3 to 10 members',
+            'Up to 10 projects',
             'Chat attachments enabled',
             'Attendance edit and report download'
         ],
@@ -45,6 +48,7 @@ const SUBSCRIPTION_PLANS = [
         trialDays: 0,
         limits: {
             maxMembers: 10,
+            maxProjects: 10,
             canUploadChatAttachments: true,
             canEditAttendance: true,
             canDownloadAttendanceReport: true
@@ -59,6 +63,7 @@ const SUBSCRIPTION_PLANS = [
         billingPeriod: 'monthly',
         features: [
             'From 10 to 50 members',
+            'Unlimited projects',
             'Chat attachments enabled',
             'Attendance edit and report download'
         ],
@@ -69,6 +74,7 @@ const SUBSCRIPTION_PLANS = [
         trialDays: 7,
         limits: {
             maxMembers: 50,
+            maxProjects: null,
             canUploadChatAttachments: true,
             canEditAttendance: true,
             canDownloadAttendanceReport: true
@@ -94,6 +100,7 @@ const serializePlans = () =>
         currency: plan.currency,
         billingPeriod: plan.billingPeriod,
         features: plan.features,
+        limits: plan.limits || null,
         isPopular: plan.isPopular,
         isActive: plan.isActive,
         paymobIntegrationId: plan.paymobIntegrationId,
@@ -200,12 +207,14 @@ const getLocalizedPlans = async (lang = 'en') => {
             const dbPlan = byId.get(plan.id);
             const tr = dbPlan?.translations?.[normalized];
             if (!tr) return localizePlan(plan, normalized);
+            const localizedFromCode = localizePlan(plan, normalized);
             const localizedFromDb = {
                 ...plan,
                 name: tr.name || plan.name,
                 description: tr.description || plan.description,
                 billingPeriod: tr.billingPeriod || plan.billingPeriod,
-                features: Array.isArray(tr.features) && tr.features.length ? tr.features : plan.features
+                // Always use code-backed features so plan limits (e.g. projects) stay in sync with enforcement.
+                features: localizedFromCode.features
             };
             // Safety fallback: if Arabic requested but DB row is stale/English, return trusted Arabic defaults.
             if (normalized === 'ar') {
@@ -231,6 +240,16 @@ const canAddMembers = (company, currentMembersCount, membersToAdd = 1) => {
     const plan = getCompanyPlan(company);
     const maxMembers = plan?.limits?.maxMembers ?? 3;
     return currentMembersCount + membersToAdd <= maxMembers;
+};
+
+/** When `limits.maxProjects` is null/undefined, project count is unlimited. */
+const canCreateMoreProjects = (company, currentProjectCount) => {
+    const plan = getCompanyPlan(company);
+    const maxProjects = plan?.limits?.maxProjects;
+    if (maxProjects == null) return true;
+    const cap = Number(maxProjects);
+    if (!Number.isFinite(cap) || cap < 0) return true;
+    return currentProjectCount < cap;
 };
 
 const addDays = (date, days) => {
@@ -390,6 +409,7 @@ module.exports = {
     serializePlans,
     getLocalizedPlans,
     canAddMembers,
+    canCreateMoreProjects,
     addDays,
     addMonths,
     evaluateAndSyncCompanySubscription

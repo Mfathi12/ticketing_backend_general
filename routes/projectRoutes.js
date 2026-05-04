@@ -1,7 +1,12 @@
 const express = require('express');
-const { Project, User, Ticket } = require('../models');
+const { Project, User, Ticket, ProjectPersonalNote, Company } = require('../models');
 const { Conversation } = require('../models/chat');
 const { authenticateToken } = require('../middleware/auth');
+const {
+    getCompanyPlan,
+    evaluateAndSyncCompanySubscription,
+    canCreateMoreProjects
+} = require('../services/subscriptionService');
 
 const router = express.Router();
 const membershipCompanyId = (entry) => {
@@ -27,6 +32,23 @@ router.post('/add-project', authenticateToken, async (req, res) => {
         const canManageProjects = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
         if (!canManageProjects) {
             return res.status(403).json({ message: 'Insufficient permissions' });
+        }
+
+        const company = await Company.findById(activeCompanyId);
+        if (!company) {
+            return res.status(404).json({ message: 'Company not found' });
+        }
+        await evaluateAndSyncCompanySubscription(company);
+        const projectCount = await Project.countDocuments({ company: activeCompanyId });
+        if (!canCreateMoreProjects(company, projectCount)) {
+            const activePlan = getCompanyPlan(company);
+            const maxProjects = activePlan.limits.maxProjects;
+            return res.status(403).json({
+                message: `Your ${activePlan.name} plan allows up to ${maxProjects} projects. Upgrade your subscription to add more.`,
+                planId: activePlan.id,
+                limit: maxProjects,
+                current: projectCount
+            });
         }
 
         if (!project_name || !start_date || !estimated_end_date) {
@@ -222,6 +244,130 @@ router.get('/my-projects', authenticateToken, async (req, res) => {
         res.json({ projects: projectsWithCounts });
     } catch (error) {
         console.error('Get projects error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+async function resolveProjectForNotes(req, projectId) {
+    const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+    const project = await Project.findById(projectId).populate('assigned_users', 'name title email role');
+    if (!project) {
+        return { error: { status: 404, message: 'Project not found' } };
+    }
+    if (!activeCompanyId || !project.company || project.company.toString() !== activeCompanyId) {
+        return { error: { status: 403, message: 'Access denied to this project' } };
+    }
+    if (
+        req.user.role !== 'admin' &&
+        req.user.role !== 'manager' &&
+        !project.assigned_users.some((user) => user._id.toString() === req.user._id.toString())
+    ) {
+        return { error: { status: 403, message: 'Access denied to this project' } };
+    }
+    return { project };
+}
+
+// Personal notes (current user only, per project)
+router.get('/:projectId/notes', authenticateToken, async (req, res) => {
+    try {
+        const { projectId } = req.params;
+        const gate = await resolveProjectForNotes(req, projectId);
+        if (gate.error) {
+            return res.status(gate.error.status).json({ message: gate.error.message });
+        }
+
+        const notes = await ProjectPersonalNote.find({
+            project: projectId,
+            user: req.user._id
+        })
+            .sort({ updatedAt: -1 })
+            .lean();
+
+        res.json({ notes });
+    } catch (error) {
+        console.error('List project notes error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+router.post('/:projectId/notes', authenticateToken, async (req, res) => {
+    try {
+        const { projectId } = req.params;
+        const { content } = req.body;
+        const gate = await resolveProjectForNotes(req, projectId);
+        if (gate.error) {
+            return res.status(gate.error.status).json({ message: gate.error.message });
+        }
+
+        if (typeof content !== 'string' || !content.trim()) {
+            return res.status(400).json({ message: 'Note content is required' });
+        }
+
+        const note = new ProjectPersonalNote({
+            project: projectId,
+            user: req.user._id,
+            content: content.trim()
+        });
+        await note.save();
+
+        res.status(201).json({ note });
+    } catch (error) {
+        console.error('Create project note error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+router.put('/:projectId/notes/:noteId', authenticateToken, async (req, res) => {
+    try {
+        const { projectId, noteId } = req.params;
+        const { content } = req.body;
+        const gate = await resolveProjectForNotes(req, projectId);
+        if (gate.error) {
+            return res.status(gate.error.status).json({ message: gate.error.message });
+        }
+
+        if (typeof content !== 'string' || !content.trim()) {
+            return res.status(400).json({ message: 'Note content is required' });
+        }
+
+        const note = await ProjectPersonalNote.findOneAndUpdate(
+            { _id: noteId, project: projectId, user: req.user._id },
+            { content: content.trim() },
+            { new: true }
+        );
+
+        if (!note) {
+            return res.status(404).json({ message: 'Note not found' });
+        }
+
+        res.json({ note });
+    } catch (error) {
+        console.error('Update project note error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+router.delete('/:projectId/notes/:noteId', authenticateToken, async (req, res) => {
+    try {
+        const { projectId, noteId } = req.params;
+        const gate = await resolveProjectForNotes(req, projectId);
+        if (gate.error) {
+            return res.status(gate.error.status).json({ message: gate.error.message });
+        }
+
+        const result = await ProjectPersonalNote.deleteOne({
+            _id: noteId,
+            project: projectId,
+            user: req.user._id
+        });
+
+        if (result.deletedCount === 0) {
+            return res.status(404).json({ message: 'Note not found' });
+        }
+
+        res.json({ message: 'Note deleted successfully' });
+    } catch (error) {
+        console.error('Delete project note error:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 });

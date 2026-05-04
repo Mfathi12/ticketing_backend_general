@@ -55,7 +55,15 @@ const corsOrigin = resolveCorsOrigin();
 const corsOptions = {
     origin: corsOrigin,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'x-lang', 'Range'],
+    allowedHeaders: [
+        'Content-Type',
+        'Authorization',
+        'X-Requested-With',
+        'x-lang',
+        'Range',
+        'Cache-Control',
+        'Pragma'
+    ],
     credentials: true
 };
 

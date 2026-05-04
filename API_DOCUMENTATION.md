@@ -146,6 +146,7 @@ Authorization: Bearer <your-jwt-token>
     "assigned_users": ["user-id-1", "user-id-2"]
   }
   ```
+- **Plan limits:** Free plan allows up to **3** projects per company; Basic up to **10**; Pro (and other paid tiers with no cap) are **unlimited**. If the limit is reached, the API returns **403** with `message`, `planId`, `limit`, and `current` (existing project count).
 
 #### Assign Users to Project (Admin/Manager only)
 - **PUT** `/api/projects/assign-users/:projectId`
