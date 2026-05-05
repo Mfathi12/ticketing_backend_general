@@ -2,7 +2,7 @@ const express = require('express');
 const { Conversation, Message } = require('../models/chat');
 const { User, Project, Company } = require('../models');
 const { createNotification } = require('../services/notificationService');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, canBypassProjectAssignment } = require('../middleware/auth');
 const { getCompanyPlan } = require('../services/subscriptionService');
 const { toAbsoluteMediaUrl } = require('../utils/mediaUrl');
 const multer = require('multer');
@@ -219,10 +219,7 @@ router.get('/project/:projectId', authenticateToken, async (req, res) => {
             user => user._id.toString() === req.user._id.toString()
         );
 
-        // Admin can access any project
-        const isAdmin = req.user.role === 'admin' || req.user.role === 'manager';
-
-        if (!isAssigned && !isAdmin) {
+        if (!isAssigned && !canBypassProjectAssignment(req)) {
             return res.status(403).json({ message: 'You are not assigned to this project' });
         }
 

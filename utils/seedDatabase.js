@@ -19,16 +19,17 @@ const seedDefaultAdmin = async () => {
             title: 'admin',
             email: 'admin@admin.com',
             password: hashedPassword,
-            role: 'admin',
+            role: 'super_admin',
             emailVerified: true,
-            registrationEmailPending: false
+            registrationEmailPending: false,
+            companies: []
         });
 
         await adminUser.save();
         console.log('Default admin user created successfully');
         console.log('Email: admin@admin.com');
         console.log('Password: 123456');
-        console.log('Role: admin');
+        console.log('Role: super_admin (platform console)');
         
     } catch (error) {
         console.error('Error creating default admin user:', error);

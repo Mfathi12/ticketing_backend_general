@@ -45,8 +45,21 @@ const userSchema = new mongoose.Schema({
     },
     role: {
         type: String,
-        enum: ['admin', 'manager', 'developer', 'tester', 'user'],
+        /**
+         * `super_admin` = platform staff (admin dashboard only). Per-company power uses `companies[].companyRole`.
+         * `admin` kept for legacy data; new company owners get `user`.
+         */
+        enum: ['super_admin', 'admin', 'manager', 'developer', 'tester', 'user'],
         default: 'user'
+    },
+    accountStatus: {
+        type: String,
+        enum: ['active', 'banned'],
+        default: 'active'
+    },
+    lastLoginAt: {
+        type: Date,
+        default: null
     },
     companies: [{
         company: {

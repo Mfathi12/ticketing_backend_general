@@ -1,7 +1,7 @@
 const express = require('express');
 const { Project, User, Ticket, ProjectPersonalNote, Company } = require('../models');
 const { Conversation } = require('../models/chat');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, canBypassProjectAssignment } = require('../middleware/auth');
 const {
     getCompanyPlan,
     evaluateAndSyncCompanySubscription,
@@ -258,8 +258,7 @@ async function resolveProjectForNotes(req, projectId) {
         return { error: { status: 403, message: 'Access denied to this project' } };
     }
     if (
-        req.user.role !== 'admin' &&
-        req.user.role !== 'manager' &&
+        !canBypassProjectAssignment(req) &&
         !project.assigned_users.some((user) => user._id.toString() === req.user._id.toString())
     ) {
         return { error: { status: 403, message: 'Access denied to this project' } };
@@ -386,8 +385,10 @@ router.get('/:projectId', authenticateToken, async (req, res) => {
             return res.status(403).json({ message: 'Access denied to this project' });
         }
 
-        // Check if user has access to this project
-        if (req.user.role !== 'admin' && req.user.role !== 'manager' && !project.assigned_users.some(user => user._id.toString() === req.user._id.toString())) {
+        if (
+            !canBypassProjectAssignment(req) &&
+            !project.assigned_users.some((user) => user._id.toString() === req.user._id.toString())
+        ) {
             return res.status(403).json({ message: 'Access denied to this project' });
         }
 

@@ -67,6 +67,10 @@ const authenticateToken = async (req, res, next) => {
             return res.status(401).json({ message: 'Invalid token' });
         }
 
+        if (user.accountStatus === 'banned') {
+            return res.status(403).json({ message: 'Account suspended' });
+        }
+
         if (user.registrationEmailPending === true) {
             return res.status(403).json({
                 message: 'Email not verified. Complete verification before using the API.'
@@ -82,9 +86,18 @@ const authenticateToken = async (req, res, next) => {
         }
 
         if (req.companyId) {
-            const company = await Company.findById(req.companyId).select('subscription');
+            const company = await Company.findById(req.companyId).select(
+                'subscription platformStatus deletedAt'
+            );
             if (!company) {
                 return res.status(404).json({ message: 'Company not found' });
+            }
+            const isPlatformStaff = req.user.role === 'super_admin';
+            if (company.deletedAt && !isPlatformStaff) {
+                return res.status(403).json({ message: 'This workspace is no longer available' });
+            }
+            if (company.platformStatus === 'suspended' && !isPlatformStaff) {
+                return res.status(403).json({ message: 'This workspace has been suspended' });
             }
             const state = await evaluateAndSyncCompanySubscription(company);
             req.subscriptionState = state;
@@ -113,10 +126,22 @@ const requireRole = (roles) => {
     };
 };
 
+/**
+ * See any project in the active company (owner / company admin|manager), legacy global manager, or platform super admin.
+ */
+const canBypassProjectAssignment = (req) => {
+    const m = req.companyMembership;
+    if (m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole))) return true;
+    if (req.user?.role === 'manager') return true;
+    if (req.user?.role === 'super_admin') return true;
+    return false;
+};
+
 module.exports = {
     authenticateToken,
     requireRole,
     resolveActiveCompany,
+    canBypassProjectAssignment,
     JWT_SECRET,
     JWT_EXPIRES_IN,
     signAccessToken

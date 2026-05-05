@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const mongoose = require('mongoose');
@@ -6,6 +7,7 @@ const { User, Company } = require('../models');
 const { sendOTPEmail, sendRegistrationOTPEmail } = require('../services/emailService');
 const { authenticateToken, signAccessToken, JWT_SECRET } = require('../middleware/auth');
 const { getCompanyPlan, evaluateAndSyncCompanySubscription } = require('../services/subscriptionService');
+require('dotenv').config();
 
 const router = express.Router();
 
@@ -34,6 +36,12 @@ const storeRegistrationOtp = (email, otp) => {
  * Builds the same JSON body as a successful POST /login (after credentials verified).
  */
 const writeLoginSuccessResponse = async (res, user, { bodyCompanyId, fcmToken }) => {
+    try {
+        await User.updateOne({ _id: user._id }, { $set: { lastLoginAt: new Date() } });
+    } catch (e) {
+        console.error('Error updating lastLoginAt:', e);
+    }
+
     if (fcmToken && typeof fcmToken === 'string' && fcmToken.trim()) {
         try {
             await User.findByIdAndUpdate(user._id, { $addToSet: { fcmTokens: fcmToken.trim() } });
@@ -237,7 +245,7 @@ router.post('/register-company', async (req, res) => {
                 title: 'Owner',
                 email: normalizedEmail,
                 password: hashedPassword,
-                role: 'admin',
+                role: 'user',
                 emailVerified: false,
                 registrationEmailPending: true
             });
@@ -469,16 +477,85 @@ router.post('/resend-registration-otp', async (req, res) => {
     }
 });
 
+/**
+ * Create a platform super admin (`role: super_admin`) for the /admin dashboard.
+ * Protected by env `PLATFORM_ADMIN_SETUP_SECRET` — set it in the server environment, call once, then remove or rotate.
+ *
+ * POST /api/auth/platform-admin/create
+ * Body: { email, password, name?, title?, setupSecret }
+ */
+router.post('/platform-admin/create', async (req, res) => {
+    try {
+        if (!(await ensureDbConnected(res))) return;
+
+        const serverSecret = String(process.env.PLATFORM_ADMIN_SETUP_SECRET || '').trim();
+        if (!serverSecret) {
+            return res.status(403).json({
+                message:
+                    'This endpoint is disabled. Set PLATFORM_ADMIN_SETUP_SECRET in the server environment, then call again.'
+            });
+        }
+
+        const { email, password, name, title, setupSecret } = req.body || {};
+        const clientSecret = String(setupSecret || '').trim();
+
+        const a = Buffer.from(serverSecret, 'utf8');
+        const b = Buffer.from(clientSecret, 'utf8');
+        if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+            return res.status(403).json({ message: 'Invalid setup secret' });
+        }
+
+        if (!email || !password) {
+            return res.status(400).json({ message: 'email and password are required' });
+        }
+        if (String(password).length < 6) {
+            return res.status(400).json({ message: 'Password must be at least 6 characters' });
+        }
+
+        const normalizedEmail = String(email).toLowerCase().trim();
+        const existing = await User.findOne({ email: normalizedEmail });
+        if (existing) {
+            return res.status(409).json({ message: 'An account with this email already exists' });
+        }
+
+        const hashed = await bcrypt.hash(String(password), 10);
+        const user = await User.create({
+            name: String(name || 'Platform Admin').trim() || 'Platform Admin',
+            title: String(title || 'admin').trim() || 'admin',
+            email: normalizedEmail,
+            password: hashed,
+            role: 'super_admin',
+            emailVerified: true,
+            registrationEmailPending: false,
+            accountStatus: 'active',
+            companies: []
+        });
+
+        return res.status(201).json({
+            message:
+                'Platform super admin created. Log in via POST /api/auth/login with platformAdminLogin: true (or the admin console).',
+            user: {
+                id: user._id,
+                name: user.name,
+                email: user.email,
+                role: user.role
+            }
+        });
+    } catch (error) {
+        console.error('platform-admin/create error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
 // 1. Login via email and password
 router.post('/login', async (req, res) => {
     try {
         if (!(await ensureDbConnected(res))) return;
-        const { email, password, companyId: bodyCompanyId, token: fcmToken } = req.body;
+        const { email, password, companyId: bodyCompanyId, token: fcmToken, platformAdminLogin } = req.body;
 
         if (!email || !password) {
             return res.status(400).json({ message: 'Email and password are required' });
         }
-        
 
         const normalizedEmail = String(email).toLowerCase().trim();
         const user = await User.findOne({ email: normalizedEmail });
@@ -495,11 +572,22 @@ router.post('/login', async (req, res) => {
             return res.status(401).json({ message: 'Invalid credentials' });
         }
 
+        if (user.accountStatus === 'banned') {
+            return res.status(403).json({ message: 'This account has been suspended' });
+        }
+
         if (user.registrationEmailPending === true) {
             return res.status(403).json({
                 message:
                     'Email not verified. Use the code we sent when you registered, or POST /api/auth/resend-registration-otp.',
                 requiresEmailVerification: true
+            });
+        }
+
+        if (platformAdminLogin === true && user.role !== 'super_admin') {
+            return res.status(403).json({
+                message:
+                    'Platform administrator access only. Use the team / company sign-in page for workspace accounts.'
             });
         }
 
@@ -546,6 +634,10 @@ router.post('/refresh', async (req, res) => {
         const user = await User.findById(decoded.userId).select('-password');
         if (!user) {
             return res.status(401).json({ message: 'User not found' });
+        }
+
+        if (user.accountStatus === 'banned') {
+            return res.status(403).json({ message: 'This account has been suspended' });
         }
 
         if (user.registrationEmailPending === true) {

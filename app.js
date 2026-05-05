@@ -22,6 +22,7 @@ const chatRoutes = require('./routes/chatRoutes');
 const attendanceRoutes = require('./routes/attendanceRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const subscriptionRoutes = require('./routes/subscriptionRoutes');
+const platformAdminRoutes = require('./routes/platformAdminRoutes');
 const versionRoutes = require('./routes/versionRoutes');
 const { languageMiddleware } = require('./middleware/language');
 const {
@@ -659,6 +660,7 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/subscriptions', subscriptionRoutes);
+app.use('/api/platform-admin', platformAdminRoutes);
 app.use('/api/version', versionRoutes);
 
 // Health check endpoint

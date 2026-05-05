@@ -486,7 +486,7 @@ router.get('/all-users', authenticateToken, async (req, res) => {
 
         const m = req.companyMembership;
         const canList =
-            req.user.role === 'admin' ||
+            req.user.role === 'super_admin' ||
             req.user.role === 'manager' ||
             (m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole)));
 

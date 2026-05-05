@@ -33,6 +33,16 @@ const companySchema = new mongoose.Schema({
             default: false
         }
     }],
+    /** Platform (super-admin) controls — not company org roles */
+    platformStatus: {
+        type: String,
+        enum: ['active', 'suspended'],
+        default: 'active'
+    },
+    deletedAt: {
+        type: Date,
+        default: null
+    },
     subscription: {
         planId: {
             type: String,
@@ -78,6 +88,14 @@ const companySchema = new mongoose.Schema({
         updatedAt: {
             type: Date,
             default: Date.now
+        },
+        lastBillingFailureAt: {
+            type: Date,
+            default: null
+        },
+        lastBillingFailureReason: {
+            type: String,
+            default: null
         }
     }
 }, {
