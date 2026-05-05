@@ -89,7 +89,7 @@ const writeLoginSuccessResponse = async (res, user, { bodyCompanyId, fcmToken })
 
     const token = signAccessToken(payload);
     const activeCompany = activeCompanyId
-        ? await Company.findById(activeCompanyId).select('subscription')
+        ? await Company.findById(activeCompanyId).select('name subscription')
         : null;
     const subscriptionState = activeCompany
         ? await evaluateAndSyncCompanySubscription(activeCompany)
@@ -102,6 +102,8 @@ const writeLoginSuccessResponse = async (res, user, { bodyCompanyId, fcmToken })
         message: 'Login successful',
         token,
         activeCompanyId: activeCompanyId || null,
+        companyName: activeCompany?.name || null,
+        userName: user.name,
         user: {
             id: user._id,
             name: user.name,
@@ -205,10 +207,26 @@ const mapCompaniesWithMembership = (memberships = [], companies = []) =>
 router.post('/register-company', async (req, res) => {
     try {
         if (!(await ensureDbConnected(res))) return;
-        const { companyName, email, password } = req.body;
+        const { companyName, ownerName, email, password } = req.body;
 
-        if (!companyName || !email || !password) {
-            return res.status(400).json({ message: 'companyName, email and password are required' });
+        if (!email || !password) {
+            return res.status(400).json({ message: 'email and password are required' });
+        }
+
+        const rawCompanyName = companyName != null ? String(companyName).trim() : '';
+        const rawOwnerName = ownerName != null ? String(ownerName).trim() : '';
+
+        // Backward compatibility:
+        // - older clients send only companyName
+        // - newer clients send both companyName and ownerName
+        // - if one side is missing, safely mirror from the other
+        const trimmedCompanyName = rawCompanyName || rawOwnerName;
+        const trimmedOwnerName = rawOwnerName || rawCompanyName;
+
+        if (!trimmedCompanyName || !trimmedOwnerName) {
+            return res.status(400).json({
+                message: 'Provide at least one of companyName or ownerName, plus email and password'
+            });
         }
 
         if (password.length < 8) {
@@ -241,7 +259,7 @@ router.post('/register-company', async (req, res) => {
         } else {
             const hashedPassword = await bcrypt.hash(password, 12);
             ownerUser = await User.create({
-                name: companyName.trim(),
+                name: trimmedOwnerName,
                 title: 'Owner',
                 email: normalizedEmail,
                 password: hashedPassword,
@@ -251,8 +269,19 @@ router.post('/register-company', async (req, res) => {
             });
         }
 
+        const existingCompanyWithSameName = await Company.findOne({
+            ownerUser: ownerUser._id,
+            name: { $regex: new RegExp(`^${trimmedCompanyName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+        }).select('_id name');
+
+        if (existingCompanyWithSameName) {
+            return res.status(409).json({
+                message: 'You already have a company with this name. Please choose a different company name.'
+            });
+        }
+
         const createCompanyPayload = {
-            name: companyName.trim(),
+            name: trimmedCompanyName,
             email: normalizedEmail,
             ownerUser: ownerUser._id,
             subscription: {
@@ -315,7 +344,7 @@ router.post('/register-company', async (req, res) => {
             const otp = generateOTP();
             storeRegistrationOtp(normalizedEmail, otp);
             try {
-                await sendRegistrationOTPEmail(normalizedEmail, otp, companyName.trim());
+                await sendRegistrationOTPEmail(normalizedEmail, otp, trimmedCompanyName);
             } catch (mailErr) {
                 console.error('Registration OTP email failed:', mailErr);
                 return res.status(502).json({
@@ -327,6 +356,8 @@ router.post('/register-company', async (req, res) => {
                 message: 'Company created. Enter the verification code sent to your email to activate your account.',
                 requiresEmailVerification: true,
                 activeCompanyId: company._id,
+                companyName: company.name,
+                userName: ownerUser.name,
                 company: {
                     id: company._id,
                     name: company.name,
@@ -364,6 +395,8 @@ router.post('/register-company', async (req, res) => {
             message: 'Company registered successfully',
             token,
             activeCompanyId: company._id,
+            companyName: company.name,
+            userName: ownerUser.name,
             company: {
                 id: company._id,
                 name: company.name,
@@ -716,6 +749,12 @@ router.post('/forgot-password', async (req, res) => {
         const user = await User.findOne({ email: email.toLowerCase() });
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
+        }
+
+        if (user.registrationEmailPending === true || user.emailVerified === false) {
+            return res.status(403).json({
+                message: 'This account is not activated yet. Verify your email first before using forgot password.'
+            });
         }
 
         const otp = generateOTP();

@@ -534,8 +534,15 @@ router.get('/profile', authenticateToken, async (req, res) => {
         }
 
         const companiesWithMembership = await mapCompaniesWithMembership(user.companies || []);
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        const activeMembership = activeCompanyId
+            ? companiesWithMembership.find((entry) => entry.companyId === activeCompanyId)
+            : null;
 
         res.json({
+            activeCompanyId: activeCompanyId || null,
+            companyName: activeMembership?.company?.name || null,
+            userName: user.name,
             user: {
                 id: user._id,
                 name: user.name,
