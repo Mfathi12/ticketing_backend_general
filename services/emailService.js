@@ -15,10 +15,11 @@ console.log('Email Pass:', process.env.EMAIL_PASS);
 const transporter = nodemailer.createTransport({
   host: "mail.absai.dev",
   port: 587,  // Use 587 with STARTTLS (recommended)
-  secure: false,  // true for 465, false for 587
+  secure: false,
+    // true for 465, false for 587
   auth: {
-    user: "tickets@absai.dev",  // tickets@absai.dev
-    pass: "absai@12345"  // Absaidev@12345,
+    user: process.env.EMAIL_USER,  // tickets@absai.dev
+    pass: process.env.EMAIL_PASS,  // Absaidev@12345,
   },
   tls: {
     rejectUnauthorized: false  // Accept self-signed certs (remove in production)
@@ -34,7 +35,7 @@ transporter.verify(function(error, success) {
 async function sendTestEmail(to, subject, text, html) {
   try {
     const info = await transporter.sendMail({
-      from: '"ABSAI Support" <tickets@absai.dev>',
+      from: '"tik." <'+process.env.EMAIL_USER+'>',
       to: to,
       subject: subject,
       text: text,
@@ -60,7 +61,7 @@ async function sendTestEmail(to, subject, text, html) {
 const sendEmail = async (to, subject, text, html, cc = null) => {
     try {
         const mailOptions = {
-            from: "tickets@absai.dev",
+            from: '"tik." <'+process.env.EMAIL_USER+'>',
             to,
             subject,
             text,
