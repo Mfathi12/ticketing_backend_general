@@ -1,7 +1,8 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-
+const dns = require('dns/promises');
+dns.setServers(["1.1.1.1"]);
 require('dotenv').config();
 
 // Prefer public DNS resolvers for Atlas SRV lookups on some Windows setups.
@@ -24,6 +25,7 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const subscriptionRoutes = require('./routes/subscriptionRoutes');
 const platformAdminRoutes = require('./routes/platformAdminRoutes');
 const versionRoutes = require('./routes/versionRoutes');
+const landingRoutes = require('./routes/landingRoutes');
 const { languageMiddleware } = require('./middleware/language');
 const {
     sendEightHourCheckoutReminders,
@@ -662,6 +664,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/subscriptions', subscriptionRoutes);
 app.use('/api/platform-admin', platformAdminRoutes);
 app.use('/api/version', versionRoutes);
+app.use('/api/landing', landingRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
