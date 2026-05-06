@@ -266,6 +266,30 @@ router.post('/register-company', async (req, res) => {
                     requiresEmailVerification: true
                 });
             }
+
+            // If owner name was changed while adding another company with the same email,
+            // keep the latest owner name in user profile and owner memberships.
+            const normalizedOwnerName = String(trimmedOwnerName || '').trim();
+            const currentName = String(ownerUser.name || '').trim();
+            if (normalizedOwnerName && normalizedOwnerName !== currentName) {
+                ownerUser.name = normalizedOwnerName;
+                if (!Array.isArray(ownerUser.companies)) {
+                    ownerUser.companies = [];
+                }
+                ownerUser.companies = ownerUser.companies.map((membership) => {
+                    const isOwnerMembership = membership?.isOwner === true || membership?.companyRole === 'owner';
+                    if (!isOwnerMembership) return membership;
+                    const membershipObject =
+                        membership && typeof membership.toObject === 'function'
+                            ? membership.toObject()
+                            : membership;
+                    return {
+                        ...membershipObject,
+                        displayName: normalizedOwnerName
+                    };
+                });
+                await ownerUser.save();
+            }
         } else {
             const hashedPassword = await bcrypt.hash(password, 12);
             ownerUser = await User.create({
