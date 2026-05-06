@@ -16,6 +16,7 @@ const membershipCompanyId = (entry) => {
     if (typeof raw === 'object' && raw._id) return String(raw._id);
     return String(raw);
 };
+const normalizeProjectName = (name) => String(name || '').trim().replace(/\s+/g, ' ');
 
 // 5. Add new project (Admin/Manager only)
 router.post('/add-project', authenticateToken, async (req, res) => {
@@ -51,8 +52,19 @@ router.post('/add-project', authenticateToken, async (req, res) => {
             });
         }
 
-        if (!project_name || !start_date || !estimated_end_date) {
+        const normalizedProjectName = normalizeProjectName(project_name);
+        if (!normalizedProjectName || !start_date || !estimated_end_date) {
             return res.status(400).json({ message: 'Project name, start date, and estimated end date are required' });
+        }
+
+        const existingProject = await Project.findOne({
+            company: activeCompanyId,
+            project_name: normalizedProjectName
+        }).collation({ locale: 'en', strength: 2 });
+        if (existingProject) {
+            return res.status(409).json({
+                message: 'A project with this name already exists in your company'
+            });
         }
 
         const incomingAssignedUsers = Array.isArray(assigned_users) ? assigned_users : [];
@@ -78,7 +90,7 @@ router.post('/add-project', authenticateToken, async (req, res) => {
         }
 
         const newProject = new Project({
-            project_name,
+            project_name: normalizedProjectName,
             start_date: new Date(start_date),
             estimated_end_date: new Date(estimated_end_date),
             assigned_users: normalizedAssignedUsers,
@@ -93,7 +105,7 @@ router.post('/add-project', authenticateToken, async (req, res) => {
                 company: activeCompanyId,
                 participants: normalizedAssignedUsers,
                 isGroup: true,
-                groupName: project_name,
+                groupName: normalizedProjectName,
                 project: newProject._id,
                 groupAdmin: req.user._id
             });
