@@ -30,6 +30,7 @@ const mapCompaniesWithMembership = async (memberships = []) => {
         );
         return {
             companyId: entryCompanyId,
+            displayName: typeof entry?.displayName === 'string' ? entry.displayName.trim() : '',
             companyRole: entry.companyRole,
             isOwner: entry.isOwner,
             company: matchedCompany || null
