@@ -18,6 +18,22 @@ const membershipCompanyId = (entry) => {
     return String(raw);
 };
 
+const getRequestDisplayName = (req) => {
+    const membershipDisplayName = typeof req.companyMembership?.displayName === 'string'
+        ? req.companyMembership.displayName.trim()
+        : '';
+    if (membershipDisplayName) {
+        return membershipDisplayName;
+    }
+
+    const isOwner = Boolean(req.companyMembership?.isOwner) || req.companyMembership?.companyRole === 'owner';
+    if (isOwner && req.activeCompanyName) {
+        return req.activeCompanyName;
+    }
+
+    return req.user?.name || req.user?.email || '';
+};
+
 /**
  * Resolves active company from JWT `companyId` (preferred) or `x-company-id` header.
  * Validates membership on the loaded user. Sets req.companyId / req.companyMembership or null.
@@ -87,11 +103,12 @@ const authenticateToken = async (req, res, next) => {
 
         if (req.companyId) {
             const company = await Company.findById(req.companyId).select(
-                'subscription platformStatus deletedAt'
+                'name subscription platformStatus deletedAt'
             );
             if (!company) {
                 return res.status(404).json({ message: 'Company not found' });
             }
+            req.activeCompanyName = company.name || null;
             const isPlatformStaff = req.user.role === 'super_admin';
             if (company.deletedAt && !isPlatformStaff) {
                 return res.status(403).json({ message: 'This workspace is no longer available' });
@@ -141,6 +158,7 @@ module.exports = {
     authenticateToken,
     requireRole,
     resolveActiveCompany,
+    getRequestDisplayName,
     canBypassProjectAssignment,
     JWT_SECRET,
     JWT_EXPIRES_IN,

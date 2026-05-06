@@ -1,13 +1,30 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const { Ticket, Project, User } = require('../models');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, getRequestDisplayName } = require('../middleware/auth');
 const { sendTicketNotification } = require('../services/emailService');
 const { processImages } = require('../utils/imageHelper');
 const { createNotification } = require('../services/notificationService');
 const { toAbsoluteMediaUrl, mapMediaUrls } = require('../utils/mediaUrl');
 
 const router = express.Router();
+const membershipCompanyId = (entry) => {
+    if (!entry) return null;
+    const raw = entry.companyId ?? entry.company;
+    if (!raw) return null;
+    if (typeof raw === 'object' && raw._id) return String(raw._id);
+    return String(raw);
+};
+const resolveMembershipDisplayName = (userDoc, companyId, fallbackCompanyName = null) => {
+    const membership = (userDoc?.companies || []).find(
+        (entry) => membershipCompanyId(entry) === String(companyId)
+    );
+    const alias = typeof membership?.displayName === 'string' ? membership.displayName.trim() : '';
+    if (alias) return alias;
+    const isOwner = Boolean(membership?.isOwner) || membership?.companyRole === 'owner';
+    if (isOwner && fallbackCompanyName) return fallbackCompanyName;
+    return userDoc?.name || userDoc?.email || '';
+};
 
 const hydrateTicketMediaUrls = (req, ticketDoc) => {
     if (!ticketDoc) return ticketDoc;
@@ -432,7 +449,7 @@ router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
         const newlyCcedUsers = newCc.filter(c => !oldCc.includes(c));
 
         const io = req.app.get('io');
-        const editorName = req.user.name || req.user.email;
+        const editorName = getRequestDisplayName(req);
         const projectName = updatedTicket.project?.project_name || 'Unknown Project';
         const ticketPayload = {
             _id: updatedTicket._id,
@@ -624,7 +641,7 @@ router.post('/ticket/:ticketId/reply', authenticateToken, async (req, res) => {
 
         // Create new reply
         const newReply = {
-            user: req.user.name || req.user.email,
+            user: getRequestDisplayName(req),
             userId: req.user._id,
             userEmail: req.user.email,
             comment: comment.trim(),
@@ -636,10 +653,13 @@ router.post('/ticket/:ticketId/reply', authenticateToken, async (req, res) => {
         await ticket.save();
 
         // Populate user info in reply
-        await ticket.populate('replies.userId', 'name email title');
+        await ticket.populate('replies.userId', 'name email title companies');
 
         // Get the newly added reply (last one)
         const addedReply = ticket.replies[ticket.replies.length - 1];
+        const replyUserDisplayName = addedReply?.userId
+            ? resolveMembershipDisplayName(addedReply.userId, activeCompanyId, req.activeCompanyName || null)
+            : addedReply?.user || getRequestDisplayName(req);
 
         // Send email notification for new reply
         try {
@@ -676,12 +696,12 @@ router.post('/ticket/:ticketId/reply', authenticateToken, async (req, res) => {
                     ticket.requested_to_email, 
                     {
                         ticket: ticket.ticket,
-                        sender_title: `${req.user.name || req.user.email} (Reply Author)`,
+                        sender_title: `${getRequestDisplayName(req)} (Reply Author)`,
                         receiver: ticket.requested_to,
                         description: ticket.description,
                         status: ticket.status,
                         date_of_issue: ticket.date,
-                        receiver_comment: `New Reply from ${req.user.name || req.user.email}:\n\n${comment}` // New reply comment with author info
+                        receiver_comment: `New Reply from ${getRequestDisplayName(req)}:\n\n${comment}` // New reply comment with author info
                     }, 
                     'replied',
                     finalCcEmails
@@ -695,7 +715,7 @@ router.post('/ticket/:ticketId/reply', authenticateToken, async (req, res) => {
         // Send Socket.io and FCM notification for new reply
         try {
             const io = req.app.get('io');
-            const replyAuthorName = req.user.name || req.user.email;
+            const replyAuthorName = getRequestDisplayName(req);
             const replyComment = comment.trim();
 
             const buildPayload = (isCc) => ({
@@ -770,6 +790,13 @@ router.post('/ticket/:ticketId/reply', authenticateToken, async (req, res) => {
             message: 'Reply added successfully',
             reply: {
                 ...addedReply.toObject(),
+                userId: addedReply?.userId
+                    ? {
+                        ...(addedReply.userId.toObject ? addedReply.userId.toObject() : addedReply.userId),
+                        name: replyUserDisplayName
+                    }
+                    : addedReply.userId,
+                user: replyUserDisplayName,
                 images: mapMediaUrls(addedReply.images, req)
             }
         });
@@ -906,7 +933,7 @@ router.get('/ticket/:ticketId/comments', authenticateToken, async (req, res) => 
         
         // Only populate replies.userId if replies exist
         if (ticket && ticket.replies && ticket.replies.length > 0) {
-            await ticket.populate('replies.userId', 'name email title role');
+            await ticket.populate('replies.userId', 'name email title role companies');
         }
 
         if (!ticket) {
@@ -961,10 +988,22 @@ router.get('/ticket/:ticketId/comments', authenticateToken, async (req, res) => 
                 status: ticket.status,
                 priority: ticket.priority
             },
-            comments: allComments.map((comment) => ({
-                ...comment,
-                images: mapMediaUrls(comment.images, req)
-            })),
+            comments: allComments.map((comment) => {
+                const resolvedUserName = comment?.userId && typeof comment.userId === 'object'
+                    ? resolveMembershipDisplayName(comment.userId, activeCompanyId, req.activeCompanyName || null)
+                    : (comment?.user || 'Unknown');
+                return {
+                    ...comment,
+                    user: resolvedUserName,
+                    userId: comment?.userId && typeof comment.userId === 'object'
+                        ? {
+                            ...(comment.userId.toObject ? comment.userId.toObject() : comment.userId),
+                            name: resolvedUserName
+                        }
+                        : comment?.userId,
+                    images: mapMediaUrls(comment.images, req)
+                };
+            }),
             count: allComments.length
         });
     } catch (error) {
