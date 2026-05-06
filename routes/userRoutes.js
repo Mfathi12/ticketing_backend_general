@@ -374,6 +374,12 @@ router.put('/change-password', authenticateToken, async (req, res) => {
         if (!isCurrentPasswordValid) {
             return res.status(400).json({ message: 'Current password is incorrect' });
         }
+        const isSameAsCurrent = await bcrypt.compare(newPassword, user.password);
+        if (isSameAsCurrent) {
+            return res.status(400).json({
+                message: 'New password must be different from current password'
+            });
+        }
 
         const hashedNewPassword = await bcrypt.hash(newPassword, 12);
         await User.findByIdAndUpdate(req.user._id, { password: hashedNewPassword });
