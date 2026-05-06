@@ -67,6 +67,10 @@ const userSchema = new mongoose.Schema({
             ref: 'Company',
             required: true
         },
+        displayName: {
+            type: String,
+            trim: true
+        },
         companyRole: {
             type: String,
             enum: ['owner', 'admin', 'manager', 'developer', 'tester', 'user'],

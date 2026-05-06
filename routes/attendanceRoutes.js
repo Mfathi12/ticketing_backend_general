@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Attendance = require('../models/attendance');
 const { Company } = require('../models');
-const { authenticateToken } = require('../middleware/auth');
+const { authenticateToken, getRequestDisplayName } = require('../middleware/auth');
 const { getCompanyPlan } = require('../services/subscriptionService');
 const {
     generateMonthlyReport,
@@ -12,6 +12,40 @@ const {
 const { createNotification } = require('../services/notificationService');
 const { getAttendanceTodayString } = require('../services/attendanceDateUtils');
 const { rolloverStaleOpenSessionsForUser } = require('../services/attendanceReminderService');
+const membershipCompanyId = (entry) => {
+    if (!entry) return null;
+    const raw = entry.companyId ?? entry.company;
+    if (!raw) return null;
+    if (typeof raw === 'object' && raw._id) return String(raw._id);
+    return String(raw);
+};
+const resolveMembershipDisplayName = (userDoc, companyId, fallbackCompanyName = null) => {
+    const membership = (userDoc?.companies || []).find(
+        (entry) => membershipCompanyId(entry) === String(companyId)
+    );
+    const alias = typeof membership?.displayName === 'string' ? membership.displayName.trim() : '';
+    if (alias) return alias;
+    const isOwner = Boolean(membership?.isOwner) || membership?.companyRole === 'owner';
+    if (isOwner && fallbackCompanyName) return fallbackCompanyName;
+    return userDoc?.name || userDoc?.email || '';
+};
+const normalizeAttendanceUserNames = (attendanceDoc, companyId, fallbackCompanyName = null) => {
+    if (!attendanceDoc) return attendanceDoc;
+    const attendance = attendanceDoc.toObject ? attendanceDoc.toObject() : { ...attendanceDoc };
+    if (attendance.user && typeof attendance.user === 'object') {
+        attendance.user = {
+            ...attendance.user,
+            name: resolveMembershipDisplayName(attendance.user, companyId, fallbackCompanyName)
+        };
+    }
+    if (attendance.lastEditedBy && typeof attendance.lastEditedBy === 'object') {
+        attendance.lastEditedBy = {
+            ...attendance.lastEditedBy,
+            name: resolveMembershipDisplayName(attendance.lastEditedBy, companyId, fallbackCompanyName)
+        };
+    }
+    return attendance;
+};
 
 /**
  * Read optional WGS84 coordinates from JSON body (latitude/longitude or lat/lng).
@@ -316,7 +350,7 @@ router.put(
                 attendance.continuousCheckIn = undefined;
             }
 
-            const editorName = req.user.name || req.user.email;
+            const editorName = getRequestDisplayName(req);
             const employeeId = attendance.user;
             if (employeeId && employeeId.toString() !== req.user._id.toString()) {
                 try {
@@ -336,12 +370,16 @@ router.put(
                 }
             }
 
-            await attendance.populate('user', 'name email title role');
-            await attendance.populate('lastEditedBy', 'name email');
+            await attendance.populate('user', 'name email title role companies');
+            await attendance.populate('lastEditedBy', 'name email companies');
 
             res.json({
                 message: 'Attendance updated successfully',
-                attendance
+                attendance: normalizeAttendanceUserNames(
+                    attendance,
+                    activeCompanyId,
+                    req.activeCompanyName || null
+                )
             });
         } catch (error) {
             console.error('Admin edit attendance error:', error);
@@ -395,7 +433,7 @@ router.get('/all-attendance', authenticateToken, async (req, res) => {
         const skip = (page - 1) * limit;
 
         const logs = await Attendance.find(query)
-            .populate('user', 'name email title role')
+            .populate('user', 'name email title role companies')
             .sort({ date: -1, checkIn: -1 })
             .skip(skip)
             .limit(limit);
@@ -403,7 +441,9 @@ router.get('/all-attendance', authenticateToken, async (req, res) => {
         const total = await Attendance.countDocuments(query);
 
         res.json({
-            logs,
+            logs: logs.map((entry) =>
+                normalizeAttendanceUserNames(entry, activeCompanyId, req.activeCompanyName || null)
+            ),
             pagination: {
                 total,
                 page,

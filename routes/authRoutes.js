@@ -91,6 +91,16 @@ const writeLoginSuccessResponse = async (res, user, { bodyCompanyId, fcmToken })
     const activeCompany = activeCompanyId
         ? await Company.findById(activeCompanyId).select('name subscription')
         : null;
+    const activeMembership = activeCompanyId
+        ? memberships.find((entry) => normalizeCompanyId(entry) === activeCompanyId)
+        : null;
+    const activeMembershipDisplayName = typeof activeMembership?.displayName === 'string'
+        ? activeMembership.displayName.trim()
+        : '';
+    const activeMembershipIsOwner =
+        Boolean(activeMembership?.isOwner) || activeMembership?.companyRole === 'owner';
+    const resolvedName = activeMembershipDisplayName
+        || ((activeMembershipIsOwner && activeCompany?.name) ? activeCompany.name : user.name);
     const subscriptionState = activeCompany
         ? await evaluateAndSyncCompanySubscription(activeCompany)
         : null;
@@ -103,10 +113,10 @@ const writeLoginSuccessResponse = async (res, user, { bodyCompanyId, fcmToken })
         token,
         activeCompanyId: activeCompanyId || null,
         companyName: activeCompany?.name || null,
-        userName: user.name,
+        userName: resolvedName,
         user: {
             id: user._id,
-            name: user.name,
+            name: resolvedName,
             title: user.title,
             email: user.email,
             role: user.role,
@@ -331,6 +341,7 @@ router.post('/register-company', async (req, res) => {
         if (!alreadyMember) {
             ownerUser.companies.push({
                 company: company._id,
+                displayName: trimmedOwnerName,
                 companyRole: 'owner',
                 isOwner: true
             });

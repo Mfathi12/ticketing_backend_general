@@ -16,6 +16,27 @@ const membershipCompanyId = (entry) => {
     if (typeof raw === 'object' && raw._id) return String(raw._id);
     return String(raw);
 };
+const resolveMembershipDisplayName = (userDoc, companyId, fallbackCompanyName = null) => {
+    const membership = (userDoc?.companies || []).find(
+        (entry) => membershipCompanyId(entry) === String(companyId)
+    );
+    const alias = typeof membership?.displayName === 'string' ? membership.displayName.trim() : '';
+    if (alias) return alias;
+    const isOwner = Boolean(membership?.isOwner) || membership?.companyRole === 'owner';
+    if (isOwner && fallbackCompanyName) return fallbackCompanyName;
+    return userDoc?.name || userDoc?.email || '';
+};
+const enrichAssignedUsersDisplayName = (projectDoc, companyId, fallbackCompanyName = null) => {
+    if (!projectDoc) return projectDoc;
+    const project = projectDoc.toObject ? projectDoc.toObject() : { ...projectDoc };
+    if (Array.isArray(project.assigned_users)) {
+        project.assigned_users = project.assigned_users.map((u) => ({
+            ...(u?.toObject ? u.toObject() : u),
+            name: resolveMembershipDisplayName(u, companyId, fallbackCompanyName)
+        }));
+    }
+    return project;
+};
 
 // 5. Add new project (Admin/Manager only)
 router.post('/add-project', authenticateToken, async (req, res) => {
@@ -109,7 +130,7 @@ router.post('/add-project', authenticateToken, async (req, res) => {
 
         res.status(201).json({
             message: 'Project created successfully',
-            project: newProject
+            project: enrichAssignedUsersDisplayName(newProject, activeCompanyId, req.activeCompanyName || null)
         });
     } catch (error) {
         console.error('Add project error:', error);
@@ -179,7 +200,7 @@ router.put('/assign-users/:projectId', authenticateToken, async (req, res) => {
 
         res.json({
             message: 'Users assigned to project successfully',
-            project
+            project: enrichAssignedUsersDisplayName(project, activeCompanyId, req.activeCompanyName || null)
         });
     } catch (error) {
         console.error('Assign users error:', error);
@@ -235,7 +256,7 @@ router.get('/my-projects', authenticateToken, async (req, res) => {
         const projectsWithCounts = projects.map(project => {
             const counts = countByProject[project._id.toString()] || { totalTickets: 0, openedTickets: 0 };
             return {
-                ...project.toObject(),
+                ...enrichAssignedUsersDisplayName(project, activeCompanyId, req.activeCompanyName || null),
                 totalTickets: counts.totalTickets,
                 openedTickets: counts.openedTickets
             };
@@ -392,7 +413,9 @@ router.get('/:projectId', authenticateToken, async (req, res) => {
             return res.status(403).json({ message: 'Access denied to this project' });
         }
 
-        res.json({ project });
+        res.json({
+            project: enrichAssignedUsersDisplayName(project, activeCompanyId, req.activeCompanyName || null)
+        });
     } catch (error) {
         console.error('Get project error:', error);
         res.status(500).json({ message: 'Internal server error' });

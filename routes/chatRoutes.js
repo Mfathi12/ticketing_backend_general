@@ -2,7 +2,7 @@ const express = require('express');
 const { Conversation, Message } = require('../models/chat');
 const { User, Project, Company } = require('../models');
 const { createNotification } = require('../services/notificationService');
-const { authenticateToken, canBypassProjectAssignment } = require('../middleware/auth');
+const { authenticateToken, canBypassProjectAssignment, getRequestDisplayName } = require('../middleware/auth');
 const { getCompanyPlan } = require('../services/subscriptionService');
 const { toAbsoluteMediaUrl } = require('../utils/mediaUrl');
 const multer = require('multer');
@@ -39,6 +39,57 @@ const hydrateMessageFileUrl = (req, messageDoc) => {
 };
 
 const hydrateMessagesFileUrls = (req, messages = []) => messages.map((message) => hydrateMessageFileUrl(req, message));
+const resolveMembershipDisplayName = (userDoc, companyId, fallbackCompanyName = null) => {
+    const membership = (userDoc?.companies || []).find(
+        (entry) => membershipCompanyId(entry) === String(companyId)
+    );
+    const alias = typeof membership?.displayName === 'string' ? membership.displayName.trim() : '';
+    if (alias) return alias;
+    const isOwner = Boolean(membership?.isOwner) || membership?.companyRole === 'owner';
+    if (isOwner && fallbackCompanyName) return fallbackCompanyName;
+    return userDoc?.name || userDoc?.email || '';
+};
+const attachUserDisplayName = (userDoc, companyId, fallbackCompanyName = null) => {
+    if (!userDoc) return userDoc;
+    const base = userDoc.toObject ? userDoc.toObject() : { ...userDoc };
+    return {
+        ...base,
+        name: resolveMembershipDisplayName(userDoc, companyId, fallbackCompanyName)
+    };
+};
+const attachConversationDisplayNames = (conversationDoc, companyId, fallbackCompanyName = null) => {
+    if (!conversationDoc) return conversationDoc;
+    const conversation = conversationDoc.toObject ? conversationDoc.toObject() : { ...conversationDoc };
+    if (Array.isArray(conversation.participants)) {
+        conversation.participants = conversation.participants.map((p) =>
+            attachUserDisplayName(p, companyId, fallbackCompanyName)
+        );
+    }
+    return conversation;
+};
+const attachMessageDisplayName = (messageDoc, companyId, fallbackCompanyName = null) => {
+    if (!messageDoc) return messageDoc;
+    const message = messageDoc.toObject ? messageDoc.toObject() : { ...messageDoc };
+    if (message.sender && typeof message.sender === 'object') {
+        message.sender = attachUserDisplayName(message.sender, companyId, fallbackCompanyName);
+    }
+    if (Array.isArray(message.mentions)) {
+        message.mentions = message.mentions.map((u) =>
+            attachUserDisplayName(u, companyId, fallbackCompanyName)
+        );
+    }
+    if (Array.isArray(message.reactions)) {
+        message.reactions = message.reactions.map((reaction) => ({
+            ...reaction,
+            user: reaction?.user && typeof reaction.user === 'object'
+                ? attachUserDisplayName(reaction.user, companyId, fallbackCompanyName)
+                : reaction?.user
+        }));
+    }
+    return message;
+};
+const attachMessagesDisplayName = (messages = [], companyId, fallbackCompanyName = null) =>
+    messages.map((message) => attachMessageDisplayName(message, companyId, fallbackCompanyName));
 
 // Derive file extension from mimetype when missing (e.g. images from some clients)
 const getExtFromMimetype = (mimetype, fieldname) => {
@@ -192,7 +243,13 @@ router.post('/conversation', authenticateToken, async (req, res) => {
             await conversation.populate('participants', 'name email title role');
         }
 
-        res.json({ conversation });
+        res.json({
+            conversation: attachConversationDisplayNames(
+                conversation,
+                activeCompanyId,
+                req.activeCompanyName || null
+            )
+        });
     } catch (error) {
         console.error('Get conversation error:', error);
         res.status(500).json({ message: 'Internal server error' });
@@ -255,9 +312,14 @@ router.get('/project/:projectId', authenticateToken, async (req, res) => {
         // Get unread count
         const unread = conversation.unreadCount.get(req.user._id.toString()) || 0;
 
+        const conversationWithDisplayNames = attachConversationDisplayNames(
+            conversation,
+            activeCompanyId,
+            req.activeCompanyName || null
+        );
         res.json({
             conversation: {
-                ...conversation.toObject(),
+                ...conversationWithDisplayNames,
                 unreadCount: unread
             }
         });
@@ -277,9 +339,12 @@ router.get('/users', authenticateToken, async (req, res) => {
         const users = await User.find({
             _id: { $ne: req.user._id },
             'companies.company': activeCompanyId
-        }).select('name email title role').sort({ name: 1 });
+        }).select('name email title role companies').sort({ name: 1 });
 
-        res.json({ users });
+        const company = await Company.findById(activeCompanyId).select('name');
+        res.json({
+            users: users.map((u) => attachUserDisplayName(u, activeCompanyId, company?.name || null))
+        });
     } catch (error) {
         console.error('Get users error:', error);
         res.status(500).json({ message: 'Internal server error' });
@@ -357,7 +422,11 @@ router.get('/conversations', authenticateToken, async (req, res) => {
         // Get unread count for each conversation
         const conversationsWithUnread = conversations.map(conv => {
             const unread = conv.unreadCount.get(req.user._id.toString()) || 0;
-            const conversationObj = conv.toObject();
+            const conversationObj = attachConversationDisplayNames(
+                conv,
+                activeCompanyId,
+                req.activeCompanyName || null
+            );
             if (conversationObj.lastMessage?.fileUrl) {
                 conversationObj.lastMessage.fileUrl = toAbsoluteMediaUrl(conversationObj.lastMessage.fileUrl, req);
             }
@@ -429,8 +498,13 @@ router.get('/conversation/:conversationId/messages', authenticateToken, async (r
         conversation.unreadCount.set(req.user._id.toString(), 0);
         await conversation.save();
 
+        const messagesWithDisplayNames = attachMessagesDisplayName(
+            messages.reverse(),
+            activeCompanyId,
+            req.activeCompanyName || null
+        );
         res.json({
-            messages: hydrateMessagesFileUrls(req, messages.reverse()), // Reverse to show oldest first
+            messages: hydrateMessagesFileUrls(req, messagesWithDisplayNames), // Reverse to show oldest first
             hasMore: messages.length === limit
         });
     } catch (error) {
@@ -467,7 +541,7 @@ router.post('/message', authenticateToken, async (req, res) => {
             company: activeCompanyId,
             conversation: conversationId,
             sender: req.user._id,
-            senderName: req.user.name || req.user.email,
+            senderName: getRequestDisplayName(req),
             senderEmail: req.user.email,
             type: 'text',
             content: content.trim(),
@@ -496,7 +570,7 @@ router.post('/message', authenticateToken, async (req, res) => {
 
         // Emit socket event and FCM notifications
         const io = req.app.get('io');
-        const senderName = req.user.name || req.user.email;
+        const senderName = getRequestDisplayName(req);
         const textPreview = (content || '').slice(0, 100);
 
         if (io) {
@@ -531,7 +605,9 @@ router.post('/message', authenticateToken, async (req, res) => {
             console.error('FCM error for chat text message:', fcmError);
         }
 
-        res.status(201).json({ message });
+        res.status(201).json({
+            message: attachMessageDisplayName(message, activeCompanyId, req.activeCompanyName || null)
+        });
     } catch (error) {
         console.error('Send message error:', error);
         res.status(500).json({ message: 'Internal server error' });
@@ -588,7 +664,9 @@ router.put('/message/:messageId', authenticateToken, async (req, res) => {
             });
         }
 
-        res.json({ message });
+        res.json({
+            message: attachMessageDisplayName(message, activeCompanyId, req.activeCompanyName || null)
+        });
     } catch (error) {
         console.error('Edit message error:', error);
         res.status(500).json({ message: 'Internal server error' });
@@ -692,7 +770,11 @@ router.post('/message/:messageId/reaction', authenticateToken, async (req, res) 
 
         res.json({
             messageId,
-            reactions: message.reactions
+            reactions: attachMessageDisplayName(
+                { reactions: message.reactions },
+                activeCompanyId,
+                req.activeCompanyName || null
+            ).reactions
         });
     } catch (error) {
         console.error('Reaction error:', error);
@@ -731,7 +813,7 @@ router.post('/message/:messageId/thread', authenticateToken, async (req, res) =>
             company: activeCompanyId,
             conversation: parentMessage.conversation,
             sender: req.user._id,
-            senderName: req.user.name || req.user.email,
+            senderName: getRequestDisplayName(req),
             senderEmail: req.user.email,
             type,
             content: content?.trim(),
@@ -765,7 +847,10 @@ router.post('/message/:messageId/thread', authenticateToken, async (req, res) =>
         }
 
         res.status(201).json({
-            message: hydrateMessageFileUrl(req, threadReply),
+            message: hydrateMessageFileUrl(
+                req,
+                attachMessageDisplayName(threadReply, activeCompanyId, req.activeCompanyName || null)
+            ),
             threadCount: parentMessage.threadCount
         });
     } catch (error) {
@@ -815,9 +900,19 @@ router.get('/message/:messageId/thread', authenticateToken, async (req, res) => 
             .populate('reactions.user', 'name email')
             .sort({ createdAt: 1 }); // Oldest first in threads
 
+        const parentWithDisplayName = attachMessageDisplayName(
+            parentMessage,
+            activeCompanyId,
+            req.activeCompanyName || null
+        );
+        const threadWithDisplayNames = attachMessagesDisplayName(
+            threadReplies,
+            activeCompanyId,
+            req.activeCompanyName || null
+        );
         res.json({
-            parentMessage: hydrateMessageFileUrl(req, parentMessage),
-            threadReplies: hydrateMessagesFileUrls(req, threadReplies),
+            parentMessage: hydrateMessageFileUrl(req, parentWithDisplayName),
+            threadReplies: hydrateMessagesFileUrls(req, threadWithDisplayNames),
             threadCount: threadReplies.length
         });
     } catch (error) {
@@ -887,7 +982,7 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
             company: activeCompanyId,
             conversation: conversationId,
             sender: req.user._id,
-            senderName: req.user.name || req.user.email,
+            senderName: getRequestDisplayName(req),
             senderEmail: req.user.email,
             type: type,
             fileUrl: fileUrl,
@@ -918,7 +1013,7 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
 
         // Emit socket event
         const io = req.app.get('io');
-        const senderName = req.user.name || req.user.email;
+        const senderName = getRequestDisplayName(req);
 
         if (io) {
             conversation.participants.forEach(participantId => {
@@ -932,7 +1027,7 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
                             _id: message._id,
                             sender: {
                                 _id: req.user._id,
-                                name: req.user.name,
+                                name: senderName,
                                 email: req.user.email
                             },
                             type: type,
@@ -975,7 +1070,12 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
             console.error('FCM error for chat file message:', fcmError);
         }
 
-        res.status(201).json({ message: hydrateMessageFileUrl(req, message) });
+        res.status(201).json({
+            message: hydrateMessageFileUrl(
+                req,
+                attachMessageDisplayName(message, activeCompanyId, req.activeCompanyName || null)
+            )
+        });
     } catch (error) {
         console.error('Send file message error:', error);
         res.status(500).json({ message: 'Internal server error' });

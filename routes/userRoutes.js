@@ -44,6 +44,16 @@ const canManageActiveCompanyUsers = (req) => {
     const m = req.companyMembership;
     return Boolean(m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole)));
 };
+const resolveMembershipDisplayName = (userDoc, companyId, fallbackCompanyName = null) => {
+    const membership = (userDoc?.companies || []).find(
+        (entry) => membershipCompanyId(entry) === String(companyId)
+    );
+    const alias = typeof membership?.displayName === 'string' ? membership.displayName.trim() : '';
+    if (alias) return alias;
+    const isOwner = Boolean(membership?.isOwner) || membership?.companyRole === 'owner';
+    if (isOwner && fallbackCompanyName) return fallbackCompanyName;
+    return userDoc?.name || userDoc?.email || '';
+};
 
 // 3. Add user to company — active company from JWT; owner / company admin / manager may invite
 router.post('/add-account', authenticateToken, async (req, res) => {
@@ -108,6 +118,7 @@ router.post('/add-account', authenticateToken, async (req, res) => {
                 registrationEmailPending: false,
                 companies: [{
                     company: companyId,
+                    displayName: String(name).trim(),
                     companyRole,
                     isOwner: false
                 }],
@@ -128,6 +139,7 @@ router.post('/add-account', authenticateToken, async (req, res) => {
 
             targetUser.companies.push({
                 company: companyId,
+                displayName: String(name).trim(),
                 companyRole,
                 isOwner: false
             });
@@ -509,6 +521,7 @@ router.get('/all-users', authenticateToken, async (req, res) => {
                 const u = mem.user.toObject ? mem.user.toObject() : { ...mem.user };
                 return {
                     ...u,
+                    name: resolveMembershipDisplayName(mem.user, req.companyId, company.name),
                     companyMemberRole: mem.role,
                     companyIsOwner: mem.isOwner
                 };
@@ -538,14 +551,23 @@ router.get('/profile', authenticateToken, async (req, res) => {
         const activeMembership = activeCompanyId
             ? companiesWithMembership.find((entry) => entry.companyId === activeCompanyId)
             : null;
+        const activeMembershipDisplayName = typeof activeMembership?.displayName === 'string'
+            ? activeMembership.displayName.trim()
+            : '';
+        const activeMembershipIsOwner =
+            Boolean(activeMembership?.isOwner) || activeMembership?.companyRole === 'owner';
+        const resolvedName = activeMembershipDisplayName
+            || ((activeMembershipIsOwner && activeMembership?.company?.name)
+                ? activeMembership.company.name
+                : user.name);
 
         res.json({
             activeCompanyId: activeCompanyId || null,
             companyName: activeMembership?.company?.name || null,
-            userName: user.name,
+            userName: resolvedName,
             user: {
                 id: user._id,
-                name: user.name,
+                name: resolvedName,
                 title: user.title,
                 email: user.email,
                 role: user.role,
