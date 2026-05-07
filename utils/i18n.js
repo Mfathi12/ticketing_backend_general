@@ -10,6 +10,7 @@ const dictionaries = {
             version_required: 'Version is required',
             no_version_found: 'No version found'
         },
+        
         subscription: {
             select_paid_plan: 'Please select a paid plan',
             only_card_supported: 'Only card payment is supported',
