@@ -1,10 +1,20 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const { authenticateToken } = require('../middleware/auth');
-const { User, Company, Project, Ticket } = require('../models');
-const { getPlanById, addMonths, evaluateAndSyncCompanySubscription } = require('../services/subscriptionService');
+const { User, Company, Project, Ticket, PlanCatalogOverride } = require('../models');
+const {
+    getPlanById,
+    addMonths,
+    evaluateAndSyncCompanySubscription,
+    PLAN_IDS,
+    SUBSCRIPTION_PLANS,
+    refreshPlanCatalogCache,
+    getPlansSourceList
+} = require('../services/subscriptionService');
 
 const router = express.Router();
+
+const PAID_PLAN_IDS = ['basic', 'pro', 'enterprise'];
 
 const requirePlatformAdmin = (req, res, next) => {
     if (!req.user || req.user.role !== 'super_admin') {
@@ -110,7 +120,7 @@ const buildCompaniesGrowthSeries = (companies, days = 30) => {
 
 async function applyCompanyPlanChange(companyId, planId) {
     const next = String(planId || '').toLowerCase();
-    if (!['free', 'basic', 'pro'].includes(next)) {
+    if (!PLAN_IDS.includes(next)) {
         const err = new Error('Invalid planId');
         err.status = 400;
         throw err;
@@ -254,7 +264,7 @@ const buildCompanyStatusMatch = (status) => {
             $or: [
                 { 'subscription.status': 'expired' },
                 {
-                    'subscription.planId': { $in: ['basic', 'pro'] },
+                    'subscription.planId': { $in: PAID_PLAN_IDS },
                     'subscription.expiresAt': { $lt: n },
                     $or: [
                         { 'subscription.graceEndsAt': null },
@@ -302,7 +312,7 @@ router.get('/companies', async (req, res) => {
         const match = {};
         if (!includeDeleted) match.deletedAt = null;
         if (search) match.name = { $regex: escapeRegex(search), $options: 'i' };
-        if (['free', 'basic', 'pro'].includes(plan)) match['subscription.planId'] = plan;
+        if (PLAN_IDS.includes(plan)) match['subscription.planId'] = plan;
 
         const stMatch = buildCompanyStatusMatch(status);
         if (stMatch) Object.assign(match, stMatch);
@@ -607,7 +617,7 @@ router.get('/subscriptions', async (req, res) => {
         const sortField = String(req.query.sort || 'nextbilling').toLowerCase();
         const sortDir = String(req.query.order || 'asc').toLowerCase() === 'desc' ? -1 : 1;
 
-        const match = { deletedAt: null, 'subscription.planId': { $in: ['basic', 'pro'] } };
+        const match = { deletedAt: null, 'subscription.planId': { $in: PAID_PLAN_IDS } };
         if (search) match.name = { $regex: escapeRegex(search), $options: 'i' };
 
         const sort = {};
@@ -730,6 +740,77 @@ router.post('/subscriptions/:companyId/cancel', async (req, res) => {
     } catch (e) {
         if (e.status === 404) return res.status(404).json({ message: e.message });
         console.error(e);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+/** Merged catalog (code defaults + optional DB overrides) for super-admin UI. */
+router.get('/plan-catalog', async (req, res) => {
+    try {
+        await refreshPlanCatalogCache();
+        const plans = getPlansSourceList();
+        const overrides = await PlanCatalogOverride.find({}).lean();
+        res.json({ plans, basePlans: SUBSCRIPTION_PLANS, overrides });
+    } catch (e) {
+        console.error('plan-catalog get', e);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+router.put('/plan-catalog/:planId', async (req, res) => {
+    try {
+        const planId = String(req.params.planId || '').toLowerCase();
+        if (!PLAN_IDS.includes(planId)) {
+            return res.status(400).json({ message: 'Invalid planId' });
+        }
+        const body = req.body && typeof req.body === 'object' ? req.body : {};
+        const allowedTop = new Set([
+            'name',
+            'description',
+            'price',
+            'currency',
+            'billingPeriod',
+            'features',
+            'isActive',
+            'isPopular',
+            'trialDays',
+            'paymobIntegrationId',
+            'paymobSubscriptionPlanId',
+            'limits'
+        ]);
+        const set = { planId };
+        Object.keys(body).forEach((k) => {
+            if (allowedTop.has(k) && body[k] !== undefined) {
+                set[k] = body[k];
+            }
+        });
+        await PlanCatalogOverride.findOneAndUpdate(
+            { planId },
+            { $set: set },
+            { upsert: true, new: true }
+        );
+        await refreshPlanCatalogCache();
+        const plan = getPlanById(planId);
+        const override = await PlanCatalogOverride.findOne({ planId }).lean();
+        res.json({ ok: true, plan, override });
+    } catch (e) {
+        console.error('plan-catalog put', e);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+/** Remove override row so the plan reverts to code defaults. */
+router.delete('/plan-catalog/:planId', async (req, res) => {
+    try {
+        const planId = String(req.params.planId || '').toLowerCase();
+        if (!PLAN_IDS.includes(planId)) {
+            return res.status(400).json({ message: 'Invalid planId' });
+        }
+        await PlanCatalogOverride.deleteOne({ planId });
+        await refreshPlanCatalogCache();
+        res.json({ ok: true, plan: getPlanById(planId) });
+    } catch (e) {
+        console.error('plan-catalog delete', e);
         res.status(500).json({ message: 'Internal server error' });
     }
 });

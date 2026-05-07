@@ -6,6 +6,7 @@ const Notification = require('./notification');
 const Company = require('./company');
 const Version = require('./version');
 const SubscriptionPlanContent = require('./subscriptionPlanContent');
+const PlanCatalogOverride = require('./planCatalogOverride');
 const ProjectPersonalNote = require('./projectPersonalNote');
 
 module.exports = {
@@ -18,5 +19,6 @@ module.exports = {
     Notification,
     Company,
     Version,
-    SubscriptionPlanContent
+    SubscriptionPlanContent,
+    PlanCatalogOverride
 };

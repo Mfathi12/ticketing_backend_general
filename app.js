@@ -697,6 +697,9 @@ db.on('error', (error) => {
 db.once('open', async () => {
     console.log("Connection successful to database!");
 
+    const { refreshPlanCatalogCache } = require('./services/subscriptionService');
+    await refreshPlanCatalogCache().catch((err) => console.error('Plan catalog cache (startup):', err));
+
     if (!process.env.VERCEL) {
         // Seed default admin user in persistent server only
         await seedDefaultAdmin();

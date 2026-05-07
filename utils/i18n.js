@@ -49,10 +49,16 @@ const dictionaries = {
             basic_feature_4: 'Attendance edit and report download',
             pro_name: 'Pro',
             pro_description: 'For larger teams',
-            pro_feature_1: 'From 10 to 50 members',
+            pro_feature_1: 'From 10 to 30 members',
             pro_feature_2: 'Unlimited projects',
             pro_feature_3: 'Chat attachments enabled',
-            pro_feature_4: 'Attendance edit and report download'
+            pro_feature_4: 'Attendance edit and report download',
+            enterprise_name: 'Enterprise',
+            enterprise_description: 'For organizations with 30+ members',
+            enterprise_feature_1: '30+ members',
+            enterprise_feature_2: 'Unlimited projects',
+            enterprise_feature_3: 'Chat attachments enabled',
+            enterprise_feature_4: 'Attendance edit and report download'
         },
         notifications: {
             active_company_required: 'Active company required',
@@ -112,10 +118,16 @@ const dictionaries = {
             basic_feature_4: 'تعديل الحضور وتحميل التقارير',
             pro_name: 'احترافية',
             pro_description: 'لفِرَق العمل الكبيرة',
-            pro_feature_1: 'من 10 إلى 50 فرد',
+            pro_feature_1: 'من 10 إلى 30 فرد',
             pro_feature_2: 'مشاريع غير محدودة',
             pro_feature_3: 'إتاحة مرفقات الشات',
-            pro_feature_4: 'تعديل الحضور وتحميل التقارير'
+            pro_feature_4: 'تعديل الحضور وتحميل التقارير',
+            enterprise_name: 'المؤسسات',
+            enterprise_description: 'لمؤسسات يزيد عدد أفرادها عن 30',
+            enterprise_feature_1: 'أكثر من 30 فرد',
+            enterprise_feature_2: 'مشاريع غير محدودة',
+            enterprise_feature_3: 'إتاحة مرفقات الشات',
+            enterprise_feature_4: 'تعديل الحضور وتحميل التقارير'
         },
         notifications: {
             active_company_required: 'يجب تحديد الشركة النشطة',

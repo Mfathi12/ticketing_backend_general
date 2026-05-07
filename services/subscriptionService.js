@@ -1,6 +1,8 @@
-const { SubscriptionPlanContent } = require('../models');
+const { SubscriptionPlanContent, PlanCatalogOverride } = require('../models');
 const { localizePlan, normalizeLang } = require('../utils/i18n');
 const hasArabicChars = (value) => /[\u0600-\u06FF]/.test(String(value || ''));
+
+const PLAN_IDS = ['free', 'basic', 'pro', 'enterprise'];
 
 const SUBSCRIPTION_PLANS = [
     {
@@ -62,7 +64,7 @@ const SUBSCRIPTION_PLANS = [
         currency: 'EGP',
         billingPeriod: 'monthly',
         features: [
-            'From 10 to 50 members',
+            'From 10 to 30 members',
             'Unlimited projects',
             'Chat attachments enabled',
             'Attendance edit and report download'
@@ -73,7 +75,33 @@ const SUBSCRIPTION_PLANS = [
         paymobSubscriptionPlanId: Number(process.env.PAYMOB_SUBSCRIPTION_PLAN_ID_PRO || 0) || null,
         trialDays: 7,
         limits: {
-            maxMembers: 50,
+            maxMembers: 30,
+            maxProjects: null,
+            canUploadChatAttachments: true,
+            canEditAttendance: true,
+            canDownloadAttendanceReport: true
+        }
+    },
+    {
+        id: 'enterprise',
+        name: 'Enterprise',
+        description: 'For organizations with 30+ members',
+        price: Number(process.env.PAYMOB_ENTERPRISE_PRICE || 400),
+        currency: 'EGP',
+        billingPeriod: 'monthly',
+        features: [
+            '30+ members',
+            'Unlimited projects',
+            'Chat attachments enabled',
+            'Attendance edit and report download'
+        ],
+        isPopular: false,
+        isActive: true,
+        paymobIntegrationId: Number(process.env.PAYMOB_ENTERPRISE_INTEGRATION_ID || 0) || null,
+        paymobSubscriptionPlanId: Number(process.env.PAYMOB_SUBSCRIPTION_PLAN_ID_ENTERPRISE || 0) || null,
+        trialDays: 0,
+        limits: {
+            maxMembers: null,
             maxProjects: null,
             canUploadChatAttachments: true,
             canEditAttendance: true,
@@ -84,7 +112,54 @@ const SUBSCRIPTION_PLANS = [
 
 const GRACE_PERIOD_DAYS = 7;
 
-const getPlanById = (planId) => SUBSCRIPTION_PLANS.find((plan) => plan.id === planId) || SUBSCRIPTION_PLANS[0];
+const cloneJson = (obj) => JSON.parse(JSON.stringify(obj));
+
+const mergePlanWithOverride = (basePlan, overrideDoc) => {
+    const merged = cloneJson(basePlan);
+    if (!overrideDoc) return merged;
+    const ov = overrideDoc.toObject ? overrideDoc.toObject() : { ...overrideDoc };
+    const skip = new Set(['_id', '__v', 'planId', 'createdAt', 'updatedAt']);
+    Object.keys(ov).forEach((key) => {
+        if (skip.has(key)) return;
+        const val = ov[key];
+        if (val === undefined) return;
+        if (key === 'limits' && val && typeof val === 'object') {
+            merged.limits = { ...merged.limits };
+            Object.keys(val).forEach((lk) => {
+                const lv = val[lk];
+                if (lv !== undefined) merged.limits[lk] = lv;
+            });
+        } else {
+            merged[key] = val;
+        }
+    });
+    return merged;
+};
+
+let effectivePlansCache = null;
+
+const getPlansSourceList = () =>
+    effectivePlansCache && effectivePlansCache.length ? effectivePlansCache : SUBSCRIPTION_PLANS;
+
+const refreshPlanCatalogCache = async () => {
+    try {
+        const overrides = await PlanCatalogOverride.find({}).lean();
+        const byId = new Map(overrides.map((row) => [row.planId, row]));
+        effectivePlansCache = SUBSCRIPTION_PLANS.map((base) =>
+            mergePlanWithOverride(base, byId.get(base.id))
+        );
+    } catch (e) {
+        console.error('refreshPlanCatalogCache:', e.message);
+        effectivePlansCache = SUBSCRIPTION_PLANS.map((p) => cloneJson(p));
+    }
+    return getPlansSourceList();
+};
+
+const getPlanById = (planId) => {
+    const id = String(planId || 'free').toLowerCase();
+    const list = getPlansSourceList();
+    return list.find((plan) => plan.id === id) || list[0];
+};
 
 const getCompanyPlan = (company) => {
     const planId = company?.subscription?.planId || 'free';
@@ -92,7 +167,7 @@ const getCompanyPlan = (company) => {
 };
 
 const serializePlans = () =>
-    SUBSCRIPTION_PLANS.map((plan) => ({
+    getPlansSourceList().map((plan) => ({
         id: plan.id,
         name: plan.name,
         description: plan.description,
@@ -238,8 +313,11 @@ const getLocalizedPlans = async (lang = 'en') => {
 
 const canAddMembers = (company, currentMembersCount, membersToAdd = 1) => {
     const plan = getCompanyPlan(company);
-    const maxMembers = plan?.limits?.maxMembers ?? 3;
-    return currentMembersCount + membersToAdd <= maxMembers;
+    const maxMembers = plan?.limits?.maxMembers;
+    if (maxMembers == null) return true;
+    const cap = Number(maxMembers);
+    if (!Number.isFinite(cap)) return true;
+    return currentMembersCount + membersToAdd <= cap;
 };
 
 /** When `limits.maxProjects` is null/undefined, project count is unlimited. */
@@ -403,6 +481,7 @@ const evaluateAndSyncCompanySubscription = async (company, now = new Date()) => 
 
 module.exports = {
     SUBSCRIPTION_PLANS,
+    PLAN_IDS,
     GRACE_PERIOD_DAYS,
     getPlanById,
     getCompanyPlan,
@@ -412,5 +491,8 @@ module.exports = {
     canCreateMoreProjects,
     addDays,
     addMonths,
-    evaluateAndSyncCompanySubscription
+    evaluateAndSyncCompanySubscription,
+    refreshPlanCatalogCache,
+    mergePlanWithOverride,
+    getPlansSourceList
 };

@@ -23,7 +23,7 @@ const amountToCents = (amount) => Math.round(Number(amount || 0) * 100);
 const PAYMENT_METHOD_LIST = ['card'];
 const PAYMOB_BASE_URL = process.env.PAYMOB_BASE_URL || 'https://accept.paymob.com';
 let paymobAuthTokenCache = { token: null, expiresAt: 0 };
-const PLAN_RANK = { free: 0, basic: 1, pro: 2 };
+const PLAN_RANK = { free: 0, basic: 1, pro: 2, enterprise: 3 };
 
 /** Origins allowed for Paymob return after checkout (prevents open redirects). */
 const addRedirectOrigin = (set, raw) => {

@@ -16,7 +16,7 @@ const subscriptionPlanContentSchema = new mongoose.Schema(
             type: String,
             required: true,
             unique: true,
-            enum: ['free', 'basic', 'pro'],
+            enum: ['free', 'basic', 'pro', 'enterprise'],
             index: true
         },
         translations: {
