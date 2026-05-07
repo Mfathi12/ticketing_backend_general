@@ -30,6 +30,7 @@ const mapCompaniesWithMembership = async (memberships = []) => {
         );
         return {
             companyId: entryCompanyId,
+            displayName: typeof entry?.displayName === 'string' ? entry.displayName.trim() : '',
             companyRole: entry.companyRole,
             isOwner: entry.isOwner,
             company: matchedCompany || null
@@ -372,6 +373,12 @@ router.put('/change-password', authenticateToken, async (req, res) => {
         const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
         if (!isCurrentPasswordValid) {
             return res.status(400).json({ message: 'Current password is incorrect' });
+        }
+        const isSameAsCurrent = await bcrypt.compare(newPassword, user.password);
+        if (isSameAsCurrent) {
+            return res.status(400).json({
+                message: 'New password must be different from current password'
+            });
         }
 
         const hashedNewPassword = await bcrypt.hash(newPassword, 12);
