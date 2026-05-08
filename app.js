@@ -80,6 +80,10 @@ const corsOptions = {
 const app = express();
 const port = process.env.PORT || 9091;
 
+// Browsers request these on the API host; avoid noisy 404s in serverless logs.
+app.get('/favicon.ico', (_req, res) => res.status(204).end());
+app.get('/favicon.png', (_req, res) => res.status(204).end());
+
 // Socket.io setup
 const http = require('http');
 const { Server } = require('socket.io');

@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 const { Op } = require('sequelize');
 const { SubscriptionPlanContent, PlanCatalogOverride } = require('../models');
-const { getSequelizeModels, isPostgresEnabled } = require('../db/postgres');
+const { getSequelizeModels, isPostgresEnabled, startPostgresInit } = require('../db/postgres');
 const { localizePlan, normalizeLang } = require('../utils/i18n');
 const hasArabicChars = (value) => /[\u0600-\u06FF]/.test(String(value || ''));
 
@@ -11,6 +11,9 @@ const useSqlPlanTables = () => {
     const m = getSequelizeModels();
     return Boolean(m?.SubscriptionPlanContent && m?.PlanCatalogOverride);
 };
+
+/** Avoid Mongoose plan queries when Mongo is not connected (e.g. `bufferCommands = false` with no URI). */
+const mongoosePlansReady = () => mongoose.connection.readyState === 1;
 
 const PLAN_IDS = ['free', 'basic', 'pro', 'enterprise'];
 
@@ -153,6 +156,9 @@ const getPlansSourceList = () =>
 
 const refreshPlanCatalogCache = async () => {
     try {
+        if (isPostgresEnabled()) {
+            await startPostgresInit().catch(() => {});
+        }
         let overrides;
         if (useSqlPlanTables()) {
             const rows = await getSequelizeModels().PlanCatalogOverride.findAll({ raw: true });
@@ -160,8 +166,10 @@ const refreshPlanCatalogCache = async () => {
                 ...row,
                 features: Array.isArray(row.features) ? row.features : row.features || undefined
             }));
-        } else {
+        } else if (mongoosePlansReady()) {
             overrides = await PlanCatalogOverride.find({}).lean();
+        } else {
+            overrides = [];
         }
         const byId = new Map(overrides.map((row) => [row.planId, row]));
         effectivePlansCache = SUBSCRIPTION_PLANS.map((base) =>
@@ -280,11 +288,18 @@ const ensurePlanTranslationsSeededSql = async () => {
 
 const ensurePlanTranslationsSeeded = async () => {
     if (plansSeedPromise) return plansSeedPromise;
+    if (isPostgresEnabled()) {
+        await startPostgresInit().catch(() => {});
+    }
     if (useSqlPlanTables()) {
         plansSeedPromise = ensurePlanTranslationsSeededSql().catch((error) => {
             plansSeedPromise = null;
             throw error;
         });
+        return plansSeedPromise;
+    }
+    if (!mongoosePlansReady()) {
+        plansSeedPromise = Promise.resolve();
         return plansSeedPromise;
     }
     plansSeedPromise = (async () => {
@@ -380,10 +395,12 @@ const getLocalizedPlans = async (lang = 'en') => {
                 where: { planId: { [Op.in]: basePlans.map((p) => p.id) } },
                 raw: true
             });
-        } else {
+        } else if (mongoosePlansReady()) {
             dbPlans = await SubscriptionPlanContent.find({
                 planId: { $in: basePlans.map((p) => p.id) }
             }).lean();
+        } else {
+            dbPlans = [];
         }
         const byId = new Map(dbPlans.map((doc) => [doc.planId, doc]));
 
