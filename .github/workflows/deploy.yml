@@ -1,0 +1,134 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm ci
+          
+      - name: Deploy to Contabo VPS (185.190.142.44)
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        with:
+          host: 185.190.142.44
+          username: ${{ secrets.VPS_USERNAME }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: 22
+          command_timeout: 30m
+          script: |
+            set -e  # Exit on any error
+            
+            echo "🚀 Starting deployment to 185.190.142.44..."
+            
+            # Define paths
+            PROJECT_DIR="${{ secrets.DEPLOY_PATH }}"
+            UPLOAD_DIR="/var/www/uploads"
+            BACKUP_DIR="/var/backups/app_backups"
+            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+            
+            # Create necessary directories
+            mkdir -p "$UPLOAD_DIR"
+            mkdir -p "$BACKUP_DIR"
+            mkdir -p "$PROJECT_DIR"
+            
+            # Navigate to project directory
+            cd "$PROJECT_DIR"
+            
+            # Backup current version (optional but recommended)
+            if [ -d ".git" ]; then
+              echo "📦 Creating backup..."
+              tar -czf "$BACKUP_DIR/backup_$TIMESTAMP.tar.gz" \
+                --exclude='node_modules' \
+                --exclude='.git' \
+                --exclude='upload' \
+                . || true
+              
+              # Keep only last 5 backups
+              cd "$BACKUP_DIR"
+              ls -t backup_*.tar.gz | tail -n +6 | xargs -r rm
+              cd "$PROJECT_DIR"
+            fi
+            
+            # Git operations
+            if [ -d ".git" ]; then
+              echo "📥 Pulling latest changes..."
+              git fetch origin
+              git reset --hard origin/main
+              git clean -fd -e upload -e .env
+            else
+              echo "📥 Cloning repository..."
+              cd ..
+              rm -rf "$PROJECT_DIR"
+              git clone git@github.com:YoussefAbbasMoh/ticketing_backend_Absai.git "$PROJECT_DIR"
+              cd "$PROJECT_DIR"
+            fi
+            
+            # Setup upload directory (symlink approach)
+            if [ ! -L "upload" ] && [ -d "upload" ]; then
+              echo "📁 Moving existing uploads to persistent location..."
+              rsync -a upload/ "$UPLOAD_DIR/" || true
+              rm -rf upload
+            fi
+            
+            if [ ! -L "upload" ]; then
+              echo "🔗 Creating symlink to upload directory..."
+              ln -sf "$UPLOAD_DIR" upload
+            fi
+            
+            # Install dependencies
+            echo "📦 Installing dependencies..."
+            npm ci --production
+            
+            # Run database migrations (if applicable)
+            # npm run migrate
+            
+            # Restart application with PM2
+            echo "🔄 Restarting application..."
+            if pm2 describe ticket > /dev/null 2>&1; then
+              pm2 reload ticket --update-env
+            else
+              pm2 start ecosystem.config.js
+            fi
+            
+            pm2 save
+            
+            # Health check
+            echo "🏥 Performing health check..."
+            sleep 5
+            if pm2 describe ticket | grep -q "online"; then
+              echo "✅ Application is running"
+            else
+              echo "❌ Application failed to start"
+              exit 1
+            fi
+            
+            echo "🎉 Deployment completed successfully!"
+            
+      - name: Notify deployment status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Deployment successful!"
+          else
+            echo "❌ Deployment failed!"
+            echo "Check the logs above for details"
+          fi
