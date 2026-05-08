@@ -117,7 +117,11 @@ const messageSchema = new mongoose.Schema({
 // Index for efficient querying
 messageSchema.index({ conversation: 1, createdAt: -1 });
 messageSchema.index({ sender: 1 });
+messageSchema.index({ sender: 1, createdAt: -1 });
 messageSchema.index({ parentMessage: 1 }); // Index for thread queries
+messageSchema.index({ parentMessage: 1, createdAt: -1 });
+messageSchema.index({ mentions: 1, createdAt: -1 });
+messageSchema.index({ company: 1, isDeleted: 1, createdAt: -1 });
 
 const conversationSchema = new mongoose.Schema({
     company: {
@@ -170,6 +174,9 @@ const conversationSchema = new mongoose.Schema({
 // Index for finding user conversations
 conversationSchema.index({ participants: 1 });
 conversationSchema.index({ lastMessageAt: -1 });
+conversationSchema.index({ company: 1, participants: 1 });
+conversationSchema.index({ participants: 1, lastMessageAt: -1 });
+conversationSchema.index({ company: 1, lastMessageAt: -1 });
 
 // Ensure unique conversation between two users (for 1-on-1 chats)
 conversationSchema.index({ participants: 1 }, {

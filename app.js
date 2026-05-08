@@ -86,7 +86,8 @@ const io = new Server(server, {
         methods: ['GET', 'POST'],
         credentials: true
     },
-    transports: ['polling', 'websocket'],
+    // Prefer native websocket; fall back to long-polling only if needed.
+    transports: ['websocket', 'polling'],
     allowEIO3: true
 });
 

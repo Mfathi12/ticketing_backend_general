@@ -155,4 +155,11 @@ ticketSchema.set('toObject', { virtuals: true });
 // Create compound unique index for ticket + project combination
 ticketSchema.index({ ticket: 1, project: 1 }, { unique: true });
 
+ticketSchema.index({ company: 1, project: 1 });
+ticketSchema.index({ company: 1, status: 1 });
+ticketSchema.index({ company: 1, handler: 1 });
+ticketSchema.index({ company: 1, requested_to_email: 1 });
+ticketSchema.index({ company: 1, updatedAt: -1 });
+ticketSchema.index({ company: 1, status: 1, updatedAt: -1 });
+
 module.exports = mongoose.model('Ticket', ticketSchema);

@@ -1,6 +1,7 @@
 const express = require('express');
 const { Conversation, Message } = require('../models/chat');
 const { User, Project, Company } = require('../models');
+const { fetchUsersByIdMap } = require('../utils/userBatch');
 const { createNotification } = require('../services/notificationService');
 const { authenticateToken, canBypassProjectAssignment, getRequestDisplayName } = require('../middleware/auth');
 const { getCompanyPlan } = require('../services/subscriptionService');
@@ -339,9 +340,12 @@ router.get('/users', authenticateToken, async (req, res) => {
         const users = await User.find({
             _id: { $ne: req.user._id },
             'companies.company': activeCompanyId
-        }).select('name email title role companies').sort({ name: 1 });
+        })
+            .select('name email title role companies')
+            .sort({ name: 1 })
+            .lean();
 
-        const company = await Company.findById(activeCompanyId).select('name');
+        const company = await Company.findById(activeCompanyId).select('name').lean();
         res.json({
             users: users.map((u) => attachUserDisplayName(u, activeCompanyId, company?.name || null))
         });
@@ -409,7 +413,11 @@ router.get('/conversations', authenticateToken, async (req, res) => {
             }
         }
 
-        // Now get all conversations for the user
+        // Now get all conversations for the user.
+        // .lean() returns plain JS objects (no Mongoose hydration). NOTE:
+        // under .lean() the `unreadCount` Map is delivered as a plain object,
+        // so we read it via index access (works for both Map and plain
+        // object, keeping JSON output identical via res.json).
         const conversations = await Conversation.find({
             company: activeCompanyId,
             participants: req.user._id
@@ -417,11 +425,18 @@ router.get('/conversations', authenticateToken, async (req, res) => {
             .populate('participants', 'name email title role')
             .populate('lastMessage')
             .populate('project', 'project_name')
-            .sort({ lastMessageAt: -1 });
+            .sort({ lastMessageAt: -1 })
+            .lean();
 
-        // Get unread count for each conversation
-        const conversationsWithUnread = conversations.map(conv => {
-            const unread = conv.unreadCount.get(req.user._id.toString()) || 0;
+        // Get unread count for each conversation (Map-or-plain-object safe)
+        const userIdKey = req.user._id.toString();
+        const readUnread = (raw) => {
+            if (raw == null) return 0;
+            if (typeof raw.get === 'function') return Number(raw.get(userIdKey)) || 0;
+            return Number(raw[userIdKey]) || 0;
+        };
+        const conversationsWithUnread = conversations.map((conv) => {
+            const unread = readUnread(conv.unreadCount);
             const conversationObj = attachConversationDisplayNames(
                 conv,
                 activeCompanyId,
@@ -444,6 +459,14 @@ router.get('/conversations', authenticateToken, async (req, res) => {
 });
 
 // Get messages for a conversation
+//
+// Pagination modes (both supported, backward compatible):
+//   1) Legacy:  ?page=N&limit=M           -> { messages, hasMore }     (existing contract)
+//   2) Cursor:  ?cursor=<ISO ts>&limit=M  -> { messages, hasMore, nextCursor }
+//
+// The legacy response shape is preserved exactly when ?cursor is not supplied.
+// `nextCursor` is only added when ?cursor is provided, so existing clients
+// remain unaffected.
 router.get('/conversation/:conversationId/messages', authenticateToken, async (req, res) => {
     try {
         const activeCompanyId = req.companyId ? req.companyId.toString() : null;
@@ -451,7 +474,7 @@ router.get('/conversation/:conversationId/messages', authenticateToken, async (r
             return res.status(400).json({ message: 'Active company required' });
         }
         const { conversationId } = req.params;
-        const { page = 1, limit = 50 } = req.query;
+        const { page = 1, limit = 50, cursor } = req.query;
 
         // Verify user is part of the conversation
         const conversation = await Conversation.findOne({ _id: conversationId, company: activeCompanyId });
@@ -463,18 +486,55 @@ router.get('/conversation/:conversationId/messages', authenticateToken, async (r
             return res.status(403).json({ message: 'Access denied' });
         }
 
-        // Get messages
-        const messages = await Message.find({
+        const cap = Math.min(100, Math.max(1, parseInt(limit, 10) || 50));
+        const cursorDate = cursor ? new Date(cursor) : null;
+        const useCursor = cursorDate && Number.isFinite(cursorDate.getTime());
+
+        const baseQuery = {
             company: activeCompanyId,
             conversation: conversationId,
             isDeleted: false
-        })
-            .populate('sender', 'name email title role')
-            .populate('replyTo')
-            .populate('mentions', 'name email')
-            .sort({ createdAt: -1 })
-            .limit(limit * 1)
-            .skip((page - 1) * limit);
+        };
+
+        let messages;
+        let hasMore;
+        let nextCursor = null;
+
+        if (useCursor) {
+            // Cursor mode: pull cap+1 strictly older than cursor; uses
+            // { conversation, createdAt:-1 } index, no skip cost.
+            // .lean() returns plain JS objects (no Mongoose hydration),
+            // which dominates per-message latency for large pages.
+            const docs = await Message.find({ ...baseQuery, createdAt: { $lt: cursorDate } })
+                .populate('sender', 'name email title role')
+                .populate('replyTo')
+                .populate('mentions', 'name email')
+                .sort({ createdAt: -1 })
+                .limit(cap + 1)
+                .lean();
+
+            hasMore = docs.length > cap;
+            messages = hasMore ? docs.slice(0, cap) : docs;
+            if (messages.length && hasMore) {
+                const oldest = messages[messages.length - 1];
+                if (oldest && oldest.createdAt) {
+                    nextCursor = new Date(oldest.createdAt).toISOString();
+                }
+            }
+        } else {
+            // Legacy skip/limit mode (preserved exactly).
+            // .lean() returns plain JS objects (no Mongoose hydration).
+            const pageNum = Math.max(1, parseInt(page, 10) || 1);
+            messages = await Message.find(baseQuery)
+                .populate('sender', 'name email title role')
+                .populate('replyTo')
+                .populate('mentions', 'name email')
+                .sort({ createdAt: -1 })
+                .limit(cap)
+                .skip((pageNum - 1) * cap)
+                .lean();
+            hasMore = messages.length === cap;
+        }
 
         // Mark messages as read
         await Message.updateMany(
@@ -503,10 +563,15 @@ router.get('/conversation/:conversationId/messages', authenticateToken, async (r
             activeCompanyId,
             req.activeCompanyName || null
         );
-        res.json({
+
+        const payload = {
             messages: hydrateMessagesFileUrls(req, messagesWithDisplayNames), // Reverse to show oldest first
-            hasMore: messages.length === limit
-        });
+            hasMore
+        };
+        if (useCursor) {
+            payload.nextCursor = nextCursor;
+        }
+        res.json(payload);
     } catch (error) {
         console.error('Get messages error:', error);
         res.status(500).json({ message: 'Internal server error' });
@@ -588,9 +653,12 @@ router.post('/message', authenticateToken, async (req, res) => {
 
         // Send FCM push notification to other participants
         try {
-            for (const participantId of conversation.participants) {
-                if (participantId.toString() === req.user._id.toString()) continue;
-                const participantUser = await User.findById(participantId);
+            const otherParticipantIds = conversation.participants.filter(
+                (participantId) => participantId.toString() !== req.user._id.toString()
+            );
+            const participantMap = await fetchUsersByIdMap(otherParticipantIds);
+            for (const participantId of otherParticipantIds) {
+                const participantUser = participantMap.get(participantId.toString());
                 if (!participantUser) continue;
 
                 await createNotification(participantUser._id, {
@@ -599,7 +667,7 @@ router.post('/message', authenticateToken, async (req, res) => {
                     title: `New message from ${senderName}`,
                     body: textPreview || 'New chat message',
                     data: { conversationId: String(conversationId) }
-                });
+                }, { userDoc: participantUser });
             }
         } catch (fcmError) {
             console.error('FCM error for chat text message:', fcmError);
@@ -1053,9 +1121,12 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
                         ? 'Video'
                         : 'File';
 
-            for (const participantId of conversation.participants) {
-                if (participantId.toString() === req.user._id.toString()) continue;
-                const participantUser = await User.findById(participantId);
+            const otherParticipantIdsFile = conversation.participants.filter(
+                (participantId) => participantId.toString() !== req.user._id.toString()
+            );
+            const participantMapFile = await fetchUsersByIdMap(otherParticipantIdsFile);
+            for (const participantId of otherParticipantIdsFile) {
+                const participantUser = participantMapFile.get(participantId.toString());
                 if (!participantUser) continue;
 
                 await createNotification(participantUser._id, {
@@ -1064,7 +1135,7 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
                     title: `New ${fileLabel} from ${senderName}`,
                     body: fileName || fileLabel,
                     data: { conversationId: String(conversationId) }
-                });
+                }, { userDoc: participantUser });
             }
         } catch (fcmError) {
             console.error('FCM error for chat file message:', fcmError);

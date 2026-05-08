@@ -6,6 +6,7 @@ const {
     getPlanById,
     addMonths,
     evaluateAndSyncCompanySubscription,
+    invalidateCompanySubscriptionEvalCache,
     PLAN_IDS,
     SUBSCRIPTION_PLANS,
     refreshPlanCatalogCache,
@@ -151,6 +152,7 @@ async function applyCompanyPlanChange(companyId, planId) {
     }
     c.subscription.updatedAt = now();
     await c.save();
+    invalidateCompanySubscriptionEvalCache(c._id);
     await evaluateAndSyncCompanySubscription(c);
     return c;
 }

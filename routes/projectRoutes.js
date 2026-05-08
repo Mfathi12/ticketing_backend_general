@@ -282,7 +282,9 @@ router.get('/my-projects', authenticateToken, async (req, res) => {
 
 async function resolveProjectForNotes(req, projectId) {
     const activeCompanyId = req.companyId ? req.companyId.toString() : null;
-    const project = await Project.findById(projectId).populate('assigned_users', 'name title email role');
+    const project = await Project.findById(projectId)
+        .populate('assigned_users', 'name title email role')
+        .lean();
     if (!project) {
         return { error: { status: 404, message: 'Project not found' } };
     }

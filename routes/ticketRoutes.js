@@ -1,6 +1,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
-const { Ticket, Project, User } = require('../models');
+const { Ticket, Project } = require('../models');
+const { fetchUsersByEmailMap } = require('../utils/userBatch');
 const { authenticateToken, getRequestDisplayName } = require('../middleware/auth');
 const { sendTicketNotification } = require('../services/emailService');
 const { processImages } = require('../utils/imageHelper');
@@ -120,7 +121,7 @@ router.post('/add-ticket', authenticateToken, async (req, res) => {
 
         // Create new ticket
         const processedImages = images
-            ? (Array.isArray(images) ? processImages(images) : processImages([images]))
+            ? (Array.isArray(images) ? await processImages(images) : await processImages([images]))
             : [];
         const newTicket = new Ticket({
             company: activeCompanyId,
@@ -182,8 +183,16 @@ router.post('/add-ticket', authenticateToken, async (req, res) => {
         try {
             const io = req.app.get('io');
 
-            // Find receiver user
-            const receiverUser = await User.findOne({ email: requested_to_email.toLowerCase() });
+            const handlerEmailsList = handler && Array.isArray(handler) ? handler : (handler ? [handler] : []);
+            const ccEmailsList = cc && Array.isArray(cc) ? cc : (cc ? [cc] : []);
+            const emailsToLoad = [
+                requested_to_email,
+                ...handlerEmailsList,
+                ...ccEmailsList
+            ];
+            const userByEmail = await fetchUsersByEmailMap(emailsToLoad);
+
+            const receiverUser = userByEmail.get(requested_to_email.toLowerCase());
 
             if (receiverUser) {
                 const payload = {
@@ -219,16 +228,14 @@ router.post('/add-ticket', authenticateToken, async (req, res) => {
                         projectName: projectExists.project_name || '',
                         status: newTicket.status || 'open'
                     }
-                });
+                }, { userDoc: receiverUser });
             }
 
-            // Notify handler users (assigned users)
-            const handlerEmails = handler && Array.isArray(handler) ? handler : (handler ? [handler] : []);
-            if (handlerEmails.length > 0) {
-                for (const handlerEmail of handlerEmails) {
+            if (handlerEmailsList.length > 0) {
+                for (const handlerEmail of handlerEmailsList) {
                     if (!handlerEmail) continue;
 
-                    const handlerUser = await User.findOne({ email: handlerEmail.toLowerCase() });
+                    const handlerUser = userByEmail.get(handlerEmail.toLowerCase());
                     if (!handlerUser) continue;
 
                     const payload = {
@@ -262,17 +269,15 @@ router.post('/add-ticket', authenticateToken, async (req, res) => {
                             projectName: projectExists.project_name || '',
                             status: newTicket.status || 'open'
                         }
-                    });
+                    }, { userDoc: handlerUser });
                 }
             }
 
-            // Also notify CC users
-            const ccEmails = cc && Array.isArray(cc) ? cc : (cc ? [cc] : []);
-            if (ccEmails.length > 0) {
-                for (const ccEmail of ccEmails) {
+            if (ccEmailsList.length > 0) {
+                for (const ccEmail of ccEmailsList) {
                     if (!ccEmail) continue;
 
-                    const ccUser = await User.findOne({ email: ccEmail.toLowerCase() });
+                    const ccUser = userByEmail.get(ccEmail.toLowerCase());
                     if (!ccUser) continue;
 
                     const payload = {
@@ -306,7 +311,7 @@ router.post('/add-ticket', authenticateToken, async (req, res) => {
                             projectName: projectExists.project_name || '',
                             status: newTicket.status || 'open'
                         }
-                    });
+                    }, { userDoc: ccUser });
                 }
             }
         } catch (socketError) {
@@ -411,9 +416,9 @@ router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
         if (images !== undefined) {
             // Process images - convert base64 to files if needed
             if (Array.isArray(images)) {
-                updateData.images = mapMediaUrls(processImages(images), req);
+                updateData.images = mapMediaUrls(await processImages(images), req);
             } else {
-                updateData.images = mapMediaUrls(processImages([images]), req);
+                updateData.images = mapMediaUrls(await processImages([images]), req);
             }
         }
         if (cc !== undefined) {
@@ -466,9 +471,10 @@ router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
         // Send Socket.io + FCM for newly assigned handlers
         try {
             if (newlyAssignedHandlers.length > 0) {
+                const handlerMap = await fetchUsersByEmailMap(newlyAssignedHandlers);
                 for (const handlerEmail of newlyAssignedHandlers) {
                     if (!handlerEmail) continue;
-                    const handlerUser = await User.findOne({ email: handlerEmail.toLowerCase() });
+                    const handlerUser = handlerMap.get(handlerEmail.toLowerCase());
                     if (!handlerUser) continue;
                     if (io) {
                         io.to(`user:${handlerUser._id}`).emit('ticket_assigned', {
@@ -488,7 +494,7 @@ router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
                             projectName,
                             status: updatedTicket.status || 'open'
                         }
-                    });
+                    }, { userDoc: handlerUser });
                 }
             }
         } catch (err) {
@@ -498,9 +504,10 @@ router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
         // Send Socket.io + FCM for newly CC'd users
         try {
             if (newlyCcedUsers.length > 0) {
+                const ccMap = await fetchUsersByEmailMap(newlyCcedUsers);
                 for (const ccEmail of newlyCcedUsers) {
                     if (!ccEmail) continue;
-                    const ccUser = await User.findOne({ email: ccEmail.toLowerCase() });
+                    const ccUser = ccMap.get(ccEmail.toLowerCase());
                     if (!ccUser) continue;
                     if (io) {
                         io.to(`user:${ccUser._id}`).emit('ticket_cc', {
@@ -520,7 +527,7 @@ router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
                             projectName,
                             status: updatedTicket.status || 'open'
                         }
-                    });
+                    }, { userDoc: ccUser });
                 }
             }
         } catch (err) {
@@ -549,14 +556,22 @@ router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
                         projectName,
                         status: updatedTicket.status || ''
                     }
-                });
+                }, { userDoc: userDoc });
             };
 
+            const participantEmails = [
+                updatedTicket.requested_to_email,
+                updatedTicket.requested_from_email,
+                ...[...(updatedTicket.handler || [])],
+                ...[...(updatedTicket.cc || [])]
+            ];
+            const participantMap = await fetchUsersByEmailMap(participantEmails);
+
             const receiverUser = updatedTicket.requested_to_email
-                ? await User.findOne({ email: updatedTicket.requested_to_email.toLowerCase() })
+                ? participantMap.get(updatedTicket.requested_to_email.toLowerCase())
                 : null;
             const senderUser = updatedTicket.requested_from_email
-                ? await User.findOne({ email: updatedTicket.requested_from_email.toLowerCase() })
+                ? participantMap.get(updatedTicket.requested_from_email.toLowerCase())
                 : null;
             await notifyTicketUpdated(receiverUser);
             await notifyTicketUpdated(senderUser);
@@ -565,7 +580,7 @@ router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
             const allCc = new Set([...(updatedTicket.cc || [])]);
             for (const email of [...allHandlers, ...allCc]) {
                 if (!email) continue;
-                const u = await User.findOne({ email: email.toLowerCase() });
+                const u = participantMap.get(email.toLowerCase());
                 await notifyTicketUpdated(u);
             }
         } catch (err) {
@@ -633,9 +648,9 @@ router.post('/ticket/:ticketId/reply', authenticateToken, async (req, res) => {
         let processedImages = [];
         if (images) {
             if (Array.isArray(images)) {
-                processedImages = processImages(images);
+                processedImages = await processImages(images);
             } else {
-                processedImages = processImages([images]);
+                processedImages = await processImages([images]);
             }
         }
 
@@ -756,30 +771,33 @@ router.post('/ticket/:ticketId/reply', authenticateToken, async (req, res) => {
                         ticketNumber: String(ticket.ticket),
                         status: ticket.status || ''
                     }
-                });
+                }, { userDoc });
             };
 
-            // Notify ticket receiver
-            const receiverUser = await User.findOne({ email: ticket.requested_to_email.toLowerCase() });
+            const ccEmails = ticket.cc && Array.isArray(ticket.cc) ? ticket.cc : (ticket.cc ? [ticket.cc] : []);
+            const handlerEmails = ticket.handler && Array.isArray(ticket.handler) ? ticket.handler : (ticket.handler ? [ticket.handler] : []);
+            const replyNotifyMap = await fetchUsersByEmailMap([
+                ticket.requested_to_email,
+                ticket.requested_from_email,
+                ...ccEmails,
+                ...handlerEmails
+            ]);
+
+            const receiverUser = replyNotifyMap.get(ticket.requested_to_email.toLowerCase());
             await sendToUser(receiverUser, false);
 
-            // Notify ticket sender
-            const senderUser = await User.findOne({ email: ticket.requested_from_email.toLowerCase() });
+            const senderUser = replyNotifyMap.get(ticket.requested_from_email.toLowerCase());
             await sendToUser(senderUser, false);
 
-            // Notify CC users
-            const ccEmails = ticket.cc && Array.isArray(ticket.cc) ? ticket.cc : (ticket.cc ? [ticket.cc] : []);
             for (const ccEmail of ccEmails) {
                 if (!ccEmail) continue;
-                const ccUser = await User.findOne({ email: ccEmail.toLowerCase() });
+                const ccUser = replyNotifyMap.get(ccEmail.toLowerCase());
                 await sendToUser(ccUser, true);
             }
 
-            // Notify handlers (assigned users) about new comment
-            const handlerEmails = ticket.handler && Array.isArray(ticket.handler) ? ticket.handler : (ticket.handler ? [ticket.handler] : []);
             for (const handlerEmail of handlerEmails) {
                 if (!handlerEmail) continue;
-                const handlerUser = await User.findOne({ email: handlerEmail.toLowerCase() });
+                const handlerUser = replyNotifyMap.get(handlerEmail.toLowerCase());
                 await sendToUser(handlerUser, true);
             }
         } catch (socketError) {
@@ -828,11 +846,15 @@ router.get('/my-tickets', authenticateToken, async (req, res) => {
         const canViewAllCompanyTickets = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
         if (canViewAllCompanyTickets) {
             // Admin and Manager can view all tickets (optionally filtered by projectId)
-            tickets = await Ticket.find(query).populate('project', 'project_name status');
+            tickets = await Ticket.find(query)
+                .populate('project', 'project_name status')
+                .lean({ virtuals: true });
         } else {
             // Regular users can only view tickets from their assigned projects
-            const userProjects = await Project.find({ assigned_users: req.user._id, company: activeCompanyId });
-            const projectIds = userProjects.map(project => project._id);
+            const userProjects = await Project.find({ assigned_users: req.user._id, company: activeCompanyId })
+                .select('_id')
+                .lean();
+            const projectIds = userProjects.map((project) => project._id);
             
             // If projectId is provided, verify user has access to that project
             if (projectId) {
@@ -844,14 +866,15 @@ router.get('/my-tickets', authenticateToken, async (req, res) => {
                 query.project = { $in: projectIds };
             }
             
-            tickets = await Ticket.find(query).populate('project', 'project_name status');
+            tickets = await Ticket.find(query)
+                .populate('project', 'project_name status')
+                .lean({ virtuals: true });
         }
 
         // Remove "images" from each ticket
-        const ticketsWithoutImages = tickets.map(ticket => {
-            const ticketObj = ticket.toObject();
-            delete ticketObj.images;
-            return ticketObj;
+        const ticketsWithoutImages = tickets.map((ticket) => {
+            const { images: _omit, ...rest } = ticket;
+            return rest;
         });
 
         res.json({ tickets: ticketsWithoutImages });
@@ -885,7 +908,9 @@ router.get('/my-active-tickets', authenticateToken, async (req, res) => {
                     status: { $nin: ['resolved', 'closed'] }
                 }
             ]
-        }).populate('project', 'project_name status');
+        })
+            .populate('project', 'project_name status')
+            .lean({ virtuals: true });
 
         res.json({ 
             tickets: tickets.map((ticket) => hydrateTicketMediaUrls(req, ticket)),
@@ -909,7 +934,7 @@ router.get('/search/:ticketPattern', authenticateToken, async (req, res) => {
         const tickets = await Ticket.find({ 
             company: activeCompanyId,
             ticket: { $regex: ticketPattern, $options: 'i' } 
-        });
+        }).lean({ virtuals: true });
 
         res.json({ tickets });
     } catch (error) {
@@ -1021,7 +1046,7 @@ router.get('/:ticketId', authenticateToken, async (req, res) => {
         }
         const { ticketId } = req.params;
 
-        const ticket = await Ticket.findOne({ _id: ticketId, company: activeCompanyId });
+        const ticket = await Ticket.findOne({ _id: ticketId, company: activeCompanyId }).lean({ virtuals: true });
         if (!ticket) {
             return res.status(404).json({ message: 'Ticket not found' });
         }
@@ -1046,7 +1071,7 @@ router.get('/filter/status/:status', authenticateToken, async (req, res) => {
         const m = req.companyMembership;
         const canViewAllCompanyTickets = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
         if (canViewAllCompanyTickets) {
-            tickets = await Ticket.find({ company: activeCompanyId, status });
+            tickets = await Ticket.find({ company: activeCompanyId, status }).lean({ virtuals: true });
         } else {
             tickets = await Ticket.find({ 
                 company: activeCompanyId,
@@ -1056,7 +1081,7 @@ router.get('/filter/status/:status', authenticateToken, async (req, res) => {
                     { requested_to: req.user.email },
                     { handler: req.user.email }
                 ]
-            });
+            }).lean({ virtuals: true });
         }
 
         res.json({ tickets: tickets.map((ticket) => hydrateTicketMediaUrls(req, ticket)) });
@@ -1079,7 +1104,7 @@ router.get('/', authenticateToken, async (req, res) => {
             return res.status(403).json({ message: 'Access denied. Owner/Admin/Manager role required in active company' });
         }
 
-        const tickets = await Ticket.find({ company: activeCompanyId });
+        const tickets = await Ticket.find({ company: activeCompanyId }).lean({ virtuals: true });
         res.json({ tickets: tickets.map((ticket) => hydrateTicketMediaUrls(req, ticket)) });
     } catch (error) {
         console.error('Get all tickets error:', error);

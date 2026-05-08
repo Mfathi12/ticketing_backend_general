@@ -66,5 +66,14 @@ const attendanceSchema = new mongoose.Schema({
 
 // Compound index for queries by user and calendar day (multiple sessions per day allowed)
 attendanceSchema.index({ company: 1, user: 1, date: 1 });
+// Daily company dashboard / status filters / bulk reports
+attendanceSchema.index({ company: 1, date: 1 });
+attendanceSchema.index({ company: 1, date: 1, status: 1 });
+// Employee history sorted desc (cursor-friendly)
+attendanceSchema.index({ company: 1, user: 1, date: -1 });
+// Today's check-ins lookup
+attendanceSchema.index({ company: 1, date: 1, checkIn: 1 });
+// Bulk report aggregation
+attendanceSchema.index({ company: 1, date: 1, status: 1, user: 1 });
 
 module.exports = mongoose.model('Attendance', attendanceSchema);

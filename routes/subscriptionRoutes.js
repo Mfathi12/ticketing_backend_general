@@ -10,7 +10,8 @@ const {
     addDays,
     addMonths,
     GRACE_PERIOD_DAYS,
-    evaluateAndSyncCompanySubscription
+    evaluateAndSyncCompanySubscription,
+    invalidateCompanySubscriptionEvalCache
 } = require('../services/subscriptionService');
 const { t, localizePlan } = require('../utils/i18n');
 
@@ -387,6 +388,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
             updatedAt: new Date()
         };
         await company.save();
+        invalidateCompanySubscriptionEvalCache(company._id);
         const checkoutUrl = `https://accept.paymob.com/unifiedcheckout/?publicKey=${paymobPublicKey}&clientSecret=${clientSecret}`;
 
         res.json({
@@ -496,6 +498,7 @@ router.post('/paymob/webhook', async (req, res) => {
         }
 
         await company.save();
+        invalidateCompanySubscriptionEvalCache(company._id);
         res.json({ message: t(req.lang, 'subscription.webhook_processed') });
     } catch (error) {
         console.error('Paymob webhook error:', error);
@@ -586,6 +589,7 @@ router.post('/paymob/confirm', authenticateToken, async (req, res) => {
             updatedAt: new Date()
         };
         await company.save();
+        invalidateCompanySubscriptionEvalCache(company._id);
 
         return res.json({
             message: t(req.lang, 'subscription.subscription_activated'),
@@ -632,6 +636,7 @@ router.post('/paymob/cancel', authenticateToken, async (req, res) => {
                 updatedAt: new Date()
             };
             await company.save();
+            invalidateCompanySubscriptionEvalCache(company._id);
             return res.json({
                 message: t(req.lang, 'subscription.cancelled_successfully'),
                 subscription: {
@@ -667,6 +672,7 @@ router.post('/paymob/cancel', authenticateToken, async (req, res) => {
             updatedAt: new Date()
         };
         await company.save();
+        invalidateCompanySubscriptionEvalCache(company._id);
 
         return res.json({
             message: t(req.lang, 'subscription.cancelled_successfully'),

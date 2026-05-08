@@ -114,4 +114,7 @@ const userSchema = new mongoose.Schema({
     timestamps: true
 });
 
+userSchema.index({ 'companies.company': 1 });
+userSchema.index({ accountStatus: 1, email: 1 });
+
 module.exports = mongoose.model('User', userSchema);

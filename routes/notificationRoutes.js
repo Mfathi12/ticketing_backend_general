@@ -112,14 +112,14 @@ router.patch('/:id/read', authenticateToken, async (req, res) => {
         const notification = await Notification.findOneAndUpdate(
             { _id: id, user: userId, company: activeCompanyId },
             { read: true, readAt: new Date() },
-            { new: true }
+            { new: true, lean: true }
         );
 
         if (!notification) {
             return res.status(404).json({ message: t(req.lang, 'notifications.not_found') });
         }
 
-        res.json({ notification: localizeNotification(notification.toObject(), req.lang) });
+        res.json({ notification: localizeNotification(notification, req.lang) });
     } catch (error) {
         console.error('Mark notification read error:', error);
         res.status(500).json({ message: 'Internal server error' });

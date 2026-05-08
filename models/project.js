@@ -32,4 +32,8 @@ const projectSchema = new mongoose.Schema({
     timestamps: true
 });
 
+projectSchema.index({ company: 1, assigned_users: 1 });
+projectSchema.index({ company: 1, status: 1 });
+projectSchema.index({ company: 1, estimated_end_date: 1 });
+
 module.exports = mongoose.model('Project', projectSchema);

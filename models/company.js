@@ -102,4 +102,7 @@ const companySchema = new mongoose.Schema({
     timestamps: true
 });
 
+companySchema.index({ ownerUser: 1, platformStatus: 1 });
+companySchema.index({ 'subscription.status': 1, 'subscription.expiresAt': 1 });
+
 module.exports = mongoose.model('Company', companySchema);

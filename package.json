@@ -7,6 +7,7 @@
     "start": "nodemon app.js",
     "seed": "node scripts/seed.js",
     "fix-indexes": "node scripts/fixTicketIndexes.js",
+    "perf:benchmark": "node scripts/performance-benchmark.js",
     "test": "node --test"
   },
   "keywords": [],

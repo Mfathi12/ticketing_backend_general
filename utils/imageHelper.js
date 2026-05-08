@@ -1,4 +1,4 @@
-const fs = require('fs');
+const fsp = require('fs/promises');
 const path = require('path');
 
 // Map MIME subtype to file extension (handles svg+xml, jpeg, etc.)
@@ -16,7 +16,7 @@ const mimeToExt = (subtype) => {
  * @param {string} base64Data - Base64 data URL (e.g., "data:image/png;base64,iVBORw0KG...")
  * @returns {string} - URL path to the saved file
  */
-const saveBase64AsFile = (base64Data) => {
+const saveBase64AsFile = async (base64Data) => {
     try {
         if (!base64Data || typeof base64Data !== 'string') {
             throw new Error('Invalid image data');
@@ -40,9 +40,7 @@ const saveBase64AsFile = (base64Data) => {
 
         // Create uploads directory if it doesn't exist
         const uploadsDir = path.join(__dirname, '../uploads/tickets');
-        if (!fs.existsSync(uploadsDir)) {
-            fs.mkdirSync(uploadsDir, { recursive: true });
-        }
+        await fsp.mkdir(uploadsDir, { recursive: true });
 
         // Generate unique filename with correct extension
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -50,8 +48,7 @@ const saveBase64AsFile = (base64Data) => {
         const filename = `image-${uniqueSuffix}.${ext}`;
         const filePath = path.join(uploadsDir, filename);
 
-        // Save file
-        fs.writeFileSync(filePath, buffer);
+        await fsp.writeFile(filePath, buffer);
 
         // Return URL path
         return `/uploads/tickets/${filename}`;
@@ -66,26 +63,27 @@ const saveBase64AsFile = (base64Data) => {
  * @param {Array<string>} images - Array of image URLs or base64 data URLs
  * @returns {Array<string>} - Array of image URLs
  */
-const processImages = (images) => {
+const processImages = async (images) => {
     if (!images || !Array.isArray(images)) {
         return [];
     }
 
-    return images.map(image => {
+    const out = await Promise.all(images.map(async (image) => {
         // Skip null, undefined, or non-string values
         if (!image || typeof image !== 'string') {
             console.warn('Skipping invalid image value:', image);
             return null;
         }
-        
+
         // If it's a base64 data URL, convert it to a file
         if (image.startsWith('data:image/')) {
             return saveBase64AsFile(image);
         }
-        
+
         // Otherwise, return as is (already a URL)
         return image;
-    }).filter(image => image !== null); // Remove null values
+    }));
+    return out.filter((image) => image !== null);
 };
 
 module.exports = {

@@ -342,7 +342,45 @@ const addMonths = (date, months) => {
     return value;
 };
 
-const evaluateAndSyncCompanySubscription = async (company, now = new Date()) => {
+/** In-memory cache to avoid re-running subscription math on every authenticated request when state is stable. */
+const subscriptionEvalCache = new Map();
+const SUBSCRIPTION_EVAL_CACHE_TTL_MS = Number(process.env.SUBSCRIPTION_EVAL_CACHE_TTL_MS || 10000);
+
+const fingerprintSubscription = (sub) => {
+    if (!sub) return 'nil';
+    return JSON.stringify({
+        planId: sub.planId,
+        status: sub.status,
+        expiresAt: sub.expiresAt != null ? new Date(sub.expiresAt).getTime() : null,
+        graceEndsAt: sub.graceEndsAt != null ? new Date(sub.graceEndsAt).getTime() : null,
+        updatedAt: sub.updatedAt != null ? new Date(sub.updatedAt).getTime() : null
+    });
+};
+
+/**
+ * Safe to reuse cached evaluate result: not pending, not in expiry/grace transition window.
+ */
+const canUseSubscriptionEvalCache = (company, now) => {
+    const sub = company?.subscription;
+    if (!sub || sub.status === 'pending') return false;
+    const pid = String(sub.planId || 'free').toLowerCase();
+    if (pid === 'free') {
+        if (sub.status !== 'active') return false;
+        if (sub.expiresAt != null || sub.graceEndsAt != null) return false;
+        return true;
+    }
+    if (sub.status !== 'active') return false;
+    const exp = sub.expiresAt ? new Date(sub.expiresAt) : null;
+    if (!exp || exp.getTime() <= now.getTime()) return false;
+    if (exp.getTime() - now.getTime() < 120_000) return false;
+    return true;
+};
+
+const invalidateCompanySubscriptionEvalCache = (companyId) => {
+    if (companyId != null) subscriptionEvalCache.delete(String(companyId));
+};
+
+const evaluateAndSyncCompanySubscriptionCore = async (company, now = new Date()) => {
     if (!company) {
         return {
             changed: false,
@@ -479,6 +517,47 @@ const evaluateAndSyncCompanySubscription = async (company, now = new Date()) => 
     };
 };
 
+const evaluateAndSyncCompanySubscription = async (company, now = new Date()) => {
+    if (!company) {
+        return {
+            changed: false,
+            downgraded: false,
+            inGracePeriod: false,
+            status: 'active',
+            planId: 'free',
+            notice: null
+        };
+    }
+
+    const id = String(company._id);
+    const ttl = SUBSCRIPTION_EVAL_CACHE_TTL_MS;
+    const fp = fingerprintSubscription(company.subscription);
+    const cached = subscriptionEvalCache.get(id);
+    const t = now.getTime();
+    if (
+        canUseSubscriptionEvalCache(company, now) &&
+        cached &&
+        t - cached.at < ttl &&
+        cached.fp === fp
+    ) {
+        return cached.state;
+    }
+
+    const state = await evaluateAndSyncCompanySubscriptionCore(company, now);
+
+    if (canUseSubscriptionEvalCache(company, now)) {
+        subscriptionEvalCache.set(id, {
+            at: t,
+            fp: fingerprintSubscription(company.subscription),
+            state
+        });
+    } else {
+        subscriptionEvalCache.delete(id);
+    }
+
+    return state;
+};
+
 module.exports = {
     SUBSCRIPTION_PLANS,
     PLAN_IDS,
@@ -492,6 +571,7 @@ module.exports = {
     addDays,
     addMonths,
     evaluateAndSyncCompanySubscription,
+    invalidateCompanySubscriptionEvalCache,
     refreshPlanCatalogCache,
     mergePlanWithOverride,
     getPlansSourceList
