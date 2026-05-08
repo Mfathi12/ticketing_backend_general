@@ -4,6 +4,13 @@ const cors = require('cors');
 const dns = require('dns/promises');
 dns.setServers(["1.1.1.1"]);
 require('dotenv').config();
+const mongoUri = String(process.env.MONGODB_URI || '').trim();
+if (!mongoUri) {
+    mongoose.set('bufferCommands', false);
+}
+const { startPostgresInit, isPostgresEnabled } = require('./db/postgres');
+const { isPostgresPrimary } = require('./services/sql/runtime');
+const authSql = require('./services/sql/authSql');
 
 // Prefer public DNS resolvers for Atlas SRV lookups on some Windows setups.
 
@@ -35,7 +42,7 @@ const { purgeStaleUnverifiedAccounts } = require('./services/unverifiedAccountPu
 
 
 // Import database seeder
-const { seedDefaultAdmin } = require('./utils/seedDatabase');
+const { seedDefaultAdmin, seedDefaultAdminPostgres } = require('./utils/seedDatabase');
 
 /** CORS: أضف في .env مثلاً CORS_ORIGINS=https://موقعك.netlify.app,http://localhost:5173 — فارغ أو * = السماح بأي Origin (مناسب للتطوير) */
 const resolveCorsOrigin = () => {
@@ -139,7 +146,9 @@ io.use(async (socket, next) => {
         const { User } = require('./models');
         let user;
         try {
-            user = await User.findById(decoded.userId);
+            user = isPostgresPrimary()
+                ? await authSql.findUserById(decoded.userId)
+                : await User.findById(decoded.userId);
         } catch (dbError) {
             console.error('Database error finding user:', dbError);
             const error = new Error('Database error');
@@ -676,9 +685,62 @@ app.get('/', (req, res) => {
 });
 
 // DB connection
-const mongoUri = process.env.MONGODB_URI;
+startPostgresInit()
+    .then(async ({ enabled }) => {
+        if (enabled) {
+            console.log('PostgreSQL connection successful.');
+            const { refreshPlanCatalogCache } = require('./services/subscriptionService');
+            await refreshPlanCatalogCache().catch((err) =>
+                console.error('Plan catalog cache (Postgres startup):', err.message)
+            );
+            if (!mongoUri && !process.env.VERCEL) {
+                await seedDefaultAdminPostgres();
+                if (!isPostgresPrimary()) {
+                    console.log(
+                        'MongoDB is not configured: set POSTGRES_PRIMARY=true to enable attendance cron and purge on PostgreSQL.'
+                    );
+                }
+            }
+            if (!process.env.VERCEL && isPostgresPrimary()) {
+                const intervalMinutes = parseInt(
+                    process.env.ATTENDANCE_REMINDER_INTERVAL_MINUTES || '15',
+                    10
+                );
+                const intervalMs = Math.max(intervalMinutes, 5) * 60 * 1000;
+                console.log(
+                    `Starting attendance + purge jobs (PostgreSQL) every ${intervalMs / (60 * 1000)} minutes`
+                );
+                setInterval(() => {
+                    processMidnightAttendanceRollover().catch((err) =>
+                        console.error('Attendance midnight rollover error:', err)
+                    );
+                    sendEightHourCheckoutReminders().catch((err) =>
+                        console.error('Attendance reminder interval error:', err)
+                    );
+                    purgeStaleUnverifiedAccounts().catch((err) =>
+                        console.error('Unverified account purge error:', err)
+                    );
+                }, intervalMs);
+                purgeStaleUnverifiedAccounts().catch((err) =>
+                    console.error('Unverified account purge (Postgres startup):', err)
+                );
+            }
+        } else {
+            console.log('PostgreSQL is disabled (set POSTGRES_ENABLED=true to enable).');
+        }
+    })
+    .catch((error) => {
+        console.error('PostgreSQL connection failed:', error.message);
+    });
+
 if (!mongoUri) {
-    console.error('MONGODB_URI is not set');
+    if (isPostgresEnabled()) {
+        console.warn(
+            'MONGODB_URI is not set — MongoDB is off. Use POSTGRES_PRIMARY=true for auth on Postgres; other APIs may error until migrated.'
+        );
+    } else {
+        console.error('MONGODB_URI is not set and POSTGRES_ENABLED is not true.');
+    }
 } else {
     mongoose.connect(mongoUri, {
         serverSelectionTimeoutMS: 15000,
@@ -705,24 +767,33 @@ db.once('open', async () => {
         // Seed default admin user in persistent server only
         await seedDefaultAdmin();
 
-        purgeStaleUnverifiedAccounts().catch((err) =>
-            console.error('Unverified account purge (startup):', err)
-        );
+        if (!isPostgresPrimary()) {
+            purgeStaleUnverifiedAccounts().catch((err) =>
+                console.error('Unverified account purge (startup):', err)
+            );
 
-        // Start periodic attendance reminder job after DB is connected
-        const intervalMinutes = parseInt(process.env.ATTENDANCE_REMINDER_INTERVAL_MINUTES || '15', 10);
-        const intervalMs = Math.max(intervalMinutes, 5) * 60 * 1000; // minimum 5 minutes
+            const intervalMinutes = parseInt(
+                process.env.ATTENDANCE_REMINDER_INTERVAL_MINUTES || '15',
+                10
+            );
+            const intervalMs = Math.max(intervalMinutes, 5) * 60 * 1000;
 
-        console.log(`Starting attendance reminder job every ${intervalMs / (60 * 1000)} minutes`);
+            console.log(
+                `Starting attendance reminder job every ${intervalMs / (60 * 1000)} minutes`
+            );
 
-        setInterval(() => {
-            processMidnightAttendanceRollover()
-                .catch(err => console.error('Attendance midnight rollover error:', err));
-            sendEightHourCheckoutReminders()
-                .catch(err => console.error('Attendance reminder interval error:', err));
-            purgeStaleUnverifiedAccounts()
-                .catch(err => console.error('Unverified account purge error:', err));
-        }, intervalMs);
+            setInterval(() => {
+                processMidnightAttendanceRollover().catch((err) =>
+                    console.error('Attendance midnight rollover error:', err)
+                );
+                sendEightHourCheckoutReminders().catch((err) =>
+                    console.error('Attendance reminder interval error:', err)
+                );
+                purgeStaleUnverifiedAccounts().catch((err) =>
+                    console.error('Unverified account purge error:', err)
+                );
+            }, intervalMs);
+        }
     }
 });
 

@@ -1,8 +1,12 @@
 const express = require('express');
+const { Op } = require('sequelize');
 const router = express.Router();
 const Attendance = require('../models/attendance');
 const { Company } = require('../models');
 const { authenticateToken, getRequestDisplayName } = require('../middleware/auth');
+const { isPostgresPrimary } = require('../services/sql/runtime');
+const attendanceSql = require('../services/sql/attendanceSql');
+const authSql = require('../services/sql/authSql');
 const { getCompanyPlan } = require('../services/subscriptionService');
 const {
     generateMonthlyReport,
@@ -88,7 +92,12 @@ const openSessionFilter = {
 };
 
 const ensureAttendanceEditAllowed = async (companyId) => {
-    const company = await Company.findById(companyId).select('subscription');
+    let company;
+    if (isPostgresPrimary()) {
+        company = await authSql.loadCompanyForSubscription(companyId);
+    } else {
+        company = await Company.findById(companyId).select('subscription');
+    }
     if (!company) {
         return { allowed: false, reason: 'Company not found', status: 404 };
     }
@@ -104,7 +113,12 @@ const ensureAttendanceEditAllowed = async (companyId) => {
 };
 
 const ensureAttendanceDownloadAllowed = async (companyId) => {
-    const company = await Company.findById(companyId).select('subscription');
+    let company;
+    if (isPostgresPrimary()) {
+        company = await authSql.loadCompanyForSubscription(companyId);
+    } else {
+        company = await Company.findById(companyId).select('subscription');
+    }
     if (!company) {
         return { allowed: false, reason: 'Company not found', status: 404 };
     }
@@ -130,6 +144,33 @@ router.post('/check-in', authenticateToken, async (req, res) => {
         }
         await rolloverStaleOpenSessionsForUser(userId, activeCompanyId);
         const date = getAttendanceTodayString();
+
+        if (isPostgresPrimary()) {
+            const openAny = await attendanceSql.findOpenSession(activeCompanyId, userId);
+            if (openAny) {
+                const att = await attendanceSql.hydrateAttendance(openAny);
+                return res.status(400).json({
+                    message: 'You already have an open check-in. Check out first.',
+                    attendance: att
+                });
+            }
+            const loc = readOptionalLatLng(req.body);
+            if (!loc.ok) {
+                return res.status(400).json({ message: loc.message });
+            }
+            const attendance = await attendanceSql.createCheckIn({
+                companyId: activeCompanyId,
+                userId,
+                date,
+                checkInAt: new Date(),
+                lat: loc.coords?.latitude,
+                lng: loc.coords?.longitude
+            });
+            return res.status(201).json({
+                message: 'Check-in successful',
+                attendance
+            });
+        }
 
         const openAny = await Attendance.findOne({
             company: activeCompanyId,
@@ -182,6 +223,40 @@ router.post('/check-out', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: 'Active company required' });
         }
         await rolloverStaleOpenSessionsForUser(userId, activeCompanyId);
+
+        if (isPostgresPrimary()) {
+            const row = await attendanceSql.findLatestOpenForCheckout(activeCompanyId, userId);
+            if (!row) {
+                return res.status(404).json({ message: 'No open check-in found.' });
+            }
+            const loc = readOptionalLatLng(req.body);
+            if (!loc.ok) {
+                return res.status(400).json({ message: loc.message });
+            }
+            const checkOutTime = new Date();
+            const p = row.get({ plain: true });
+            const durationMs = checkOutTime - new Date(p.checkIn);
+            const durationMins = Math.max(0, Math.floor(durationMs / 60000));
+            const checkoutNoteRaw = req.body?.note ?? req.body?.tasksDone;
+            let note = p.note;
+            if (checkoutNoteRaw != null && String(checkoutNoteRaw).trim() !== '') {
+                note = String(checkoutNoteRaw).trim().slice(0, 4000);
+            }
+            await row.update({
+                checkOut: checkOutTime,
+                duration: durationMins,
+                checkOutLatitude: loc.coords ? loc.coords.latitude : p.checkOutLatitude,
+                checkOutLongitude: loc.coords ? loc.coords.longitude : p.checkOutLongitude,
+                note
+            });
+            const attendance = await attendanceSql.hydrateAttendance(
+                await attendanceSql.getById(activeCompanyId, p.id)
+            );
+            return res.json({
+                message: 'Check-out successful',
+                attendance
+            });
+        }
 
         const attendance = await Attendance.findOne({
             company: activeCompanyId,
@@ -241,6 +316,11 @@ router.get('/my-attendance', authenticateToken, async (req, res) => {
         // Optional: Pagination or limit
         const limit = parseInt(req.query.limit) || 30; // Default last 30 entries
 
+        if (isPostgresPrimary()) {
+            const logs = await attendanceSql.listMyLogs(activeCompanyId, userId, limit);
+            return res.json({ logs });
+        }
+
         const logs = await Attendance.find({ company: activeCompanyId, user: userId })
             .sort({ date: -1, checkIn: -1 }) // Newest day first; multiple sessions same day by latest check-in
             .limit(limit);
@@ -272,6 +352,99 @@ router.put(
             const editAllowed = await ensureAttendanceEditAllowed(activeCompanyId);
             if (!editAllowed.allowed) {
                 return res.status(editAllowed.status).json({ message: editAllowed.reason });
+            }
+
+            if (isPostgresPrimary()) {
+                const attendanceRow = await attendanceSql.getById(activeCompanyId, attendanceId);
+                if (!attendanceRow) {
+                    return res.status(404).json({ message: 'Attendance record not found' });
+                }
+                let unsetCheckOut = false;
+                let unsetContinuousCheckIn = false;
+                const updates = {};
+                if (checkIn !== undefined) {
+                    const d = new Date(checkIn);
+                    if (Number.isNaN(d.getTime())) {
+                        return res.status(400).json({ message: 'Invalid checkIn date' });
+                    }
+                    updates.checkIn = d;
+                    unsetContinuousCheckIn = true;
+                }
+                if (checkOut !== undefined) {
+                    if (checkOut === null || checkOut === '') {
+                        unsetCheckOut = true;
+                    } else {
+                        const d = new Date(checkOut);
+                        if (Number.isNaN(d.getTime())) {
+                            return res.status(400).json({ message: 'Invalid checkOut date' });
+                        }
+                        updates.checkOut = d;
+                    }
+                }
+                if (status !== undefined) {
+                    if (!['present', 'half-day', 'absent'].includes(status)) {
+                        return res.status(400).json({ message: 'Invalid status' });
+                    }
+                    updates.status = status;
+                }
+                if (note !== undefined) {
+                    updates.note = note;
+                }
+                const cur = attendanceRow.get({ plain: true });
+                const nextCheckIn = updates.checkIn != null ? updates.checkIn : cur.checkIn;
+                const cin = new Date(nextCheckIn);
+                const nextCheckOut =
+                    updates.checkOut !== undefined ? updates.checkOut : cur.checkOut;
+                if (unsetCheckOut) {
+                    updates.duration = 0;
+                    updates.checkOut = null;
+                } else if (nextCheckOut) {
+                    const cout = new Date(nextCheckOut);
+                    if (cout <= cin) {
+                        return res.status(400).json({
+                            message: 'checkOut must be after checkIn'
+                        });
+                    }
+                    updates.duration = Math.floor((cout - cin) / 60000);
+                } else {
+                    updates.duration = 0;
+                }
+                updates.lastEditedByUserId = String(req.user._id);
+                updates.lastEditedAt = new Date();
+                if (unsetContinuousCheckIn) {
+                    updates.continuousCheckIn = null;
+                }
+                await attendanceRow.update(updates);
+                const reloaded = await attendanceSql.getById(activeCompanyId, attendanceId);
+                const plain = reloaded.get({ plain: true });
+                const editorName = getRequestDisplayName(req);
+                const employeeId = plain.userId;
+                if (employeeId && String(employeeId) !== String(req.user._id)) {
+                    try {
+                        await createNotification(employeeId, {
+                            company: activeCompanyId,
+                            type: 'attendance_admin_edit',
+                            title: 'Attendance updated',
+                            body: `Your attendance for ${plain.date} was updated by ${editorName}.`,
+                            data: {
+                                attendanceId: String(plain.id),
+                                date: plain.date,
+                                durationMinutes: plain.duration
+                            }
+                        });
+                    } catch (nErr) {
+                        console.error('Attendance admin edit notification:', nErr);
+                    }
+                }
+                const hydrated = await attendanceSql.hydrateAttendance(reloaded);
+                return res.json({
+                    message: 'Attendance updated successfully',
+                    attendance: normalizeAttendanceUserNames(
+                        hydrated,
+                        activeCompanyId,
+                        req.activeCompanyName || null
+                    )
+                });
             }
 
             const attendance = await Attendance.findOne({ _id: attendanceId, company: activeCompanyId });
@@ -403,15 +576,18 @@ router.get('/all-attendance', authenticateToken, async (req, res) => {
         if (!canReadAll) {
             return res.status(403).json({ message: 'Insufficient permissions' });
         }
-        let query = { company: activeCompanyId };
 
         const hasMonth = month !== undefined && month !== null && String(month).trim() !== '';
         const hasYear = year !== undefined && year !== null && String(year).trim() !== '';
+
+        let sqlFilters = {};
+        let query = { company: activeCompanyId };
 
         if (hasMonth && hasYear) {
             try {
                 const { startDate, endDate } = getMonthYearDateRange(month, year);
                 query.date = { $gte: startDate, $lt: endDate };
+                sqlFilters.date = { [Op.gte]: startDate, [Op.lt]: endDate };
             } catch (e) {
                 return res.status(400).json({ message: e.message || 'Invalid month or year' });
             }
@@ -421,16 +597,38 @@ router.get('/all-attendance', authenticateToken, async (req, res) => {
             });
         } else if (date) {
             query.date = date;
+            sqlFilters.date = date;
         }
 
         if (user) {
             query.user = user;
+            sqlFilters.userId = String(user);
         }
 
         // Default limit to 100 to avoid huge payloads, allow pagination
         const limit = parseInt(req.query.limit) || 100;
         const page = parseInt(req.query.page) || 1;
         const skip = (page - 1) * limit;
+
+        if (isPostgresPrimary()) {
+            const total = await attendanceSql.countForQuery(activeCompanyId, sqlFilters);
+            const logs = await attendanceSql.findAllPaginated(
+                activeCompanyId,
+                sqlFilters,
+                skip,
+                limit
+            );
+            return res.json({
+                logs: logs.map((entry) =>
+                    normalizeAttendanceUserNames(entry, activeCompanyId, req.activeCompanyName || null)
+                ),
+                pagination: {
+                    total,
+                    page,
+                    pages: Math.ceil(total / limit)
+                }
+            });
+        }
 
         const logs = await Attendance.find(query)
             .populate('user', 'name email title role companies')

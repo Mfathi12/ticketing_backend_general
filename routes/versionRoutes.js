@@ -1,6 +1,8 @@
 const express = require('express');
 const Version = require('../models/version');
 const { t } = require('../utils/i18n');
+const { isPostgresPrimary } = require('../services/sql/runtime');
+const versionSql = require('../services/sql/versionSql');
 
 const router = express.Router();
 
@@ -11,6 +13,15 @@ const upsertVersionHandler = async (req, res) => {
             return res.status(400).json({
                 success: false,
                 message: t(req.lang, 'version.version_required')
+            });
+        }
+
+        if (isPostgresPrimary()) {
+            const { row, created } = await versionSql.upsertVersion(version);
+            const data = versionSql.toApiShape(row);
+            return res.status(created ? 201 : 200).json({
+                success: true,
+                data
             });
         }
 
@@ -43,6 +54,20 @@ const upsertVersionHandler = async (req, res) => {
 // GET /api/version
 router.get('/', async (_req, res) => {
     try {
+        if (isPostgresPrimary()) {
+            const row = await versionSql.getLatestVersion();
+            if (!row) {
+                return res.status(404).json({
+                    success: false,
+                    message: t(req.lang, 'version.no_version_found')
+                });
+            }
+            return res.status(200).json({
+                success: true,
+                version: versionSql.toApiShape(row)
+            });
+        }
+
         const existing = await Version.findOne().sort({ updatedAt: -1 });
 
         if (!existing) {

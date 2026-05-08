@@ -1,6 +1,30 @@
+const mongoose = require('mongoose');
 const { Notification, User } = require('../models');
 const { sendNotificationToUser } = require('./fcmService');
 const { fetchUsersByIdMap } = require('../utils/userBatch');
+const { isPostgresPrimary } = require('./sql/runtime');
+const { getSequelizeModels } = require('../db/postgres');
+const authSql = require('./sql/authSql');
+
+const newObjectIdString = () => new mongoose.Types.ObjectId().toString();
+
+const notificationRowToLean = (row) => {
+    const p = row.get ? row.get({ plain: true }) : row;
+    return {
+        _id: p.id,
+        id: p.id,
+        user: p.userId,
+        company: p.companyId,
+        type: p.type,
+        title: p.title,
+        body: p.body,
+        data: p.data || {},
+        read: p.read,
+        readAt: p.readAt,
+        createdAt: p.createdAt,
+        updatedAt: p.updatedAt
+    };
+};
 
 /**
  * Create a notification (persist in DB and send FCM push).
@@ -12,6 +36,30 @@ const { fetchUsersByIdMap } = require('../utils/userBatch');
 const createNotification = async (userId, payload, options = {}) => {
     const { type, title, body = '', data = {}, company = null } = payload;
     const { userDoc = null } = options;
+
+    if (isPostgresPrimary()) {
+        const m = getSequelizeModels();
+        const row = await m.Notification.create({
+            id: newObjectIdString(),
+            userId: String(userId),
+            companyId: company ? String(company) : null,
+            type,
+            title,
+            body,
+            data: data || {},
+            read: false
+        });
+        const lean = notificationRowToLean(row);
+        try {
+            const user = userDoc || (await authSql.findUserById(userId));
+            if (user && Array.isArray(user.fcmTokens) && user.fcmTokens.length) {
+                await sendNotificationToUser(user, { title, body }, { type, ...data });
+            }
+        } catch (err) {
+            console.error('FCM send error in createNotification:', err);
+        }
+        return lean;
+    }
 
     const doc = new Notification({
         ...(company ? { company } : {}),
@@ -34,7 +82,6 @@ const createNotification = async (userId, payload, options = {}) => {
         }
     } catch (err) {
         console.error('FCM send error in createNotification:', err);
-        // Notification is already saved; don't throw
     }
 
     return doc;
@@ -54,6 +101,23 @@ const createNotification = async (userId, payload, options = {}) => {
  */
 const markNotificationsRead = async ({ userId, companyId, ids, all = false } = {}) => {
     if (!userId || !companyId) return { modifiedCount: 0 };
+    if (isPostgresPrimary()) {
+        const m = getSequelizeModels();
+        const { Op } = require('sequelize');
+        const where = { userId: String(userId), companyId: String(companyId) };
+        if (all === true) {
+            where.read = false;
+        } else if (Array.isArray(ids) && ids.length) {
+            where.id = { [Op.in]: ids.map(String) };
+        } else {
+            return { modifiedCount: 0 };
+        }
+        const [n] = await m.Notification.update(
+            { read: true, readAt: new Date() },
+            { where }
+        );
+        return { modifiedCount: n };
+    }
     const baseFilter = { user: userId, company: companyId };
     let filter;
     if (all === true) {

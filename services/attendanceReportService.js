@@ -1,5 +1,7 @@
 const { Parser } = require('json2csv');
 const Attendance = require('../models/attendance');
+const { isPostgresPrimary } = require('./sql/runtime');
+const attendanceSql = require('./sql/attendanceSql');
 
 function normalizeMonthYear(month, year) {
     const mi = parseInt(month, 10);
@@ -38,6 +40,9 @@ function getMonthYearDateRange(month, year) {
 
 async function getAttendancesForMonth(month, year, companyId) {
     const { startDate, endDate } = monthRangeBounds(month, year);
+    if (isPostgresPrimary()) {
+        return attendanceSql.getAttendancesForMonthRange(companyId, startDate, endDate);
+    }
     const query = {
         date: { $gte: startDate, $lt: endDate }
     };

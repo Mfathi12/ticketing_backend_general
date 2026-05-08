@@ -7,6 +7,10 @@ const { sendTicketNotification } = require('../services/emailService');
 const { processImages } = require('../utils/imageHelper');
 const { createNotification } = require('../services/notificationService');
 const { toAbsoluteMediaUrl, mapMediaUrls } = require('../utils/mediaUrl');
+const { isPostgresPrimary } = require('../services/sql/runtime');
+const ticketSql = require('../services/sql/ticketSql');
+const authSql = require('../services/sql/authSql');
+const { Op } = require('sequelize');
 
 const router = express.Router();
 const membershipCompanyId = (entry) => {
@@ -89,26 +93,40 @@ router.post('/add-ticket', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: 'Invalid project ID format' });
         }
 
-        // Validate project exists
-        const projectExists = await Project.findOne({ _id: project, company: activeCompanyId });
-        if (!projectExists) {
-            return res.status(400).json({ message: 'Project not found in active company' });
+        let projectExists;
+        let projectIdStr = String(project);
+        if (isPostgresPrimary()) {
+            projectExists = await ticketSql.findProjectInCompany(project, activeCompanyId);
+            if (!projectExists) {
+                return res.status(400).json({ message: 'Project not found in active company' });
+            }
+            const dup = await ticketSql.findDuplicateTicket(ticket.trim(), project, activeCompanyId);
+            if (dup) {
+                return res.status(400).json({
+                    message: 'Ticket ID already exists in this project' + dup.ticket + project
+                });
+            }
+        } else {
+            projectExists = await Project.findOne({ _id: project, company: activeCompanyId });
+            if (!projectExists) {
+                return res.status(400).json({ message: 'Project not found in active company' });
+            }
         }
 
-        // Convert project to ObjectId for consistent querying
-        const projectId = new mongoose.Types.ObjectId(project);
+        const projectId = isPostgresPrimary() ? projectIdStr : new mongoose.Types.ObjectId(project);
 
-        // Check if ticket ID already exists in the same project
-        const existingTicket = await Ticket.findOne({ 
-            ticket: ticket.trim(), 
-            company: activeCompanyId,
-            project: projectId 
-        });
-        
-        if (existingTicket) {
-            return res.status(400).json({ 
-                message: 'Ticket ID already exists in this project' + existingTicket.ticket  + projectId
+        if (!isPostgresPrimary()) {
+            const existingTicket = await Ticket.findOne({
+                ticket: ticket.trim(),
+                company: activeCompanyId,
+                project: projectId
             });
+
+            if (existingTicket) {
+                return res.status(400).json({
+                    message: 'Ticket ID already exists in this project' + existingTicket.ticket + projectId
+                });
+            }
         }
 
         // Normalize handler and CC emails to lowercase arrays
@@ -119,32 +137,54 @@ router.post('/add-ticket', authenticateToken, async (req, res) => {
             ? (Array.isArray(cc) ? cc.map(c => c.toLowerCase().trim()) : [cc.toLowerCase().trim()])
             : [];
 
-        // Create new ticket
         const processedImages = images
             ? (Array.isArray(images) ? await processImages(images) : await processImages([images]))
             : [];
-        const newTicket = new Ticket({
-            company: activeCompanyId,
-            project: projectId,
-            ticket: ticket.trim(),
-            cc: normalizedCc,
-            requested_from_email,
-            requested_to_email,
-            requested_from,
-            requested_to,
-            date: date || Date.now(),
-            time,
-            description,
-            handler: normalizedHandler,
-            status: status || 'open',
-            priority: priority || undefined,
-            images: mapMediaUrls(processedImages, req)
-        });
+        const imageUrls = mapMediaUrls(processedImages, req);
 
-        await newTicket.save();
+        let newTicket;
+        if (isPostgresPrimary()) {
+            newTicket = await ticketSql.createTicketWithChildren({
+                companyId: activeCompanyId,
+                projectId: String(project),
+                ticket: ticket.trim(),
+                requested_from,
+                requested_from_email,
+                requested_to,
+                requested_to_email,
+                date: date || Date.now(),
+                time,
+                description,
+                handler: normalizedHandler,
+                cc: normalizedCc,
+                status: status || 'open',
+                priority: priority || undefined,
+                images: imageUrls,
+                comment: null
+            });
+        } else {
+            newTicket = new Ticket({
+                company: activeCompanyId,
+                project: projectId,
+                ticket: ticket.trim(),
+                cc: normalizedCc,
+                requested_from_email,
+                requested_to_email,
+                requested_from,
+                requested_to,
+                date: date || Date.now(),
+                time,
+                description,
+                handler: normalizedHandler,
+                status: status || 'open',
+                priority: priority || undefined,
+                images: imageUrls
+            });
 
-        // Populate project details before sending notifications
-        await newTicket.populate('project', 'project_name status');
+            await newTicket.save();
+
+            await newTicket.populate('project', 'project_name status');
+        }
 
         // Send email notification with cc emails
         console.log('Requested to email:', requested_to_email);
@@ -394,7 +434,12 @@ router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
             end_date
         } = req.body;
 
-        const ticket = await Ticket.findOne({ _id: ticketId, company: activeCompanyId });
+        let ticket;
+        if (isPostgresPrimary()) {
+            ticket = await ticketSql.loadTicketGraph(ticketId, activeCompanyId);
+        } else {
+            ticket = await Ticket.findOne({ _id: ticketId, company: activeCompanyId });
+        }
         if (!ticket) {
             return res.status(404).json({ message: 'Ticket not found' });
         }
@@ -438,11 +483,35 @@ router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
         const oldHandler = ticket.handler && Array.isArray(ticket.handler) ? ticket.handler.map(h => h.toLowerCase()) : [];
         const oldCc = ticket.cc && Array.isArray(ticket.cc) ? ticket.cc.map(c => c.toLowerCase()) : [];
 
-        const updatedTicket = await Ticket.findOneAndUpdate(
-            { _id: ticketId, company: activeCompanyId },
-            updateData,
-            { new: true }
-        ).populate('project', 'project_name');
+        let updatedTicket;
+        if (isPostgresPrimary()) {
+            const sqlFields = {};
+            if (updateData.requested_from_mail) sqlFields.requested_from_email = updateData.requested_from_mail;
+            if (updateData.requested_to_mail) sqlFields.requested_to_email = updateData.requested_to_mail;
+            if (updateData.requested_to !== undefined) sqlFields.requested_to = updateData.requested_to;
+            if (updateData.date) sqlFields.date = updateData.date;
+            if (updateData.time !== undefined) sqlFields.time = updateData.time;
+            if (updateData.description) sqlFields.description = updateData.description;
+            if (updateData.status) sqlFields.status = updateData.status;
+            if (updateData.priority !== undefined) sqlFields.priority = updateData.priority;
+            if (updateData.comment !== undefined) sqlFields.comment = updateData.comment;
+            if (updateData.end_date !== undefined) sqlFields.end_date = updateData.end_date;
+            if (handler !== undefined) sqlFields.handler = updateData.handler;
+            if (cc !== undefined) sqlFields.cc = updateData.cc;
+            const imgList = updateData.images !== undefined ? updateData.images : undefined;
+            updatedTicket = await ticketSql.updateTicketSql(
+                ticketId,
+                activeCompanyId,
+                sqlFields,
+                imgList
+            );
+        } else {
+            updatedTicket = await Ticket.findOneAndUpdate(
+                { _id: ticketId, company: activeCompanyId },
+                updateData,
+                { new: true }
+            ).populate('project', 'project_name');
+        }
 
         // Get new handler and CC values
         const newHandler = updatedTicket.handler && Array.isArray(updatedTicket.handler) ? updatedTicket.handler.map(h => h.toLowerCase()) : [];
@@ -639,12 +708,16 @@ router.post('/ticket/:ticketId/reply', authenticateToken, async (req, res) => {
             });
         }
 
-        const ticket = await Ticket.findOne({ _id: ticketId, company: activeCompanyId });
+        let ticket;
+        if (isPostgresPrimary()) {
+            ticket = await ticketSql.loadTicketGraph(ticketId, activeCompanyId);
+        } else {
+            ticket = await Ticket.findOne({ _id: ticketId, company: activeCompanyId });
+        }
         if (!ticket) {
             return res.status(404).json({ message: 'Ticket not found' });
         }
 
-        // Process images if provided
         let processedImages = [];
         if (images) {
             if (Array.isArray(images)) {
@@ -654,27 +727,45 @@ router.post('/ticket/:ticketId/reply', authenticateToken, async (req, res) => {
             }
         }
 
-        // Create new reply
-        const newReply = {
-            user: getRequestDisplayName(req),
-            userId: req.user._id,
-            userEmail: req.user.email,
-            comment: comment.trim(),
-            images: mapMediaUrls(processedImages, req)
-        };
+        let addedReply;
+        let replyUserDisplayName;
 
-        // Add reply to ticket
-        ticket.replies.push(newReply);
-        await ticket.save();
+        if (isPostgresPrimary()) {
+            const urls = mapMediaUrls(processedImages, req);
+            ticket = await ticketSql.addReplySql(ticketId, activeCompanyId, {
+                user: getRequestDisplayName(req),
+                userId: req.user._id,
+                userEmail: req.user.email,
+                comment: comment.trim(),
+                imageUrls: urls
+            });
+            const replies = ticket.replies || [];
+            addedReply = replies[replies.length - 1];
+            const replyUserDoc = addedReply?.userId
+                ? await authSql.findUserById(addedReply.userId)
+                : null;
+            replyUserDisplayName = replyUserDoc
+                ? resolveMembershipDisplayName(replyUserDoc, activeCompanyId, req.activeCompanyName || null)
+                : addedReply?.user || getRequestDisplayName(req);
+        } else {
+            const newReply = {
+                user: getRequestDisplayName(req),
+                userId: req.user._id,
+                userEmail: req.user.email,
+                comment: comment.trim(),
+                images: mapMediaUrls(processedImages, req)
+            };
 
-        // Populate user info in reply
-        await ticket.populate('replies.userId', 'name email title companies');
+            ticket.replies.push(newReply);
+            await ticket.save();
 
-        // Get the newly added reply (last one)
-        const addedReply = ticket.replies[ticket.replies.length - 1];
-        const replyUserDisplayName = addedReply?.userId
-            ? resolveMembershipDisplayName(addedReply.userId, activeCompanyId, req.activeCompanyName || null)
-            : addedReply?.user || getRequestDisplayName(req);
+            await ticket.populate('replies.userId', 'name email title companies');
+
+            addedReply = ticket.replies[ticket.replies.length - 1];
+            replyUserDisplayName = addedReply?.userId
+                ? resolveMembershipDisplayName(addedReply.userId, activeCompanyId, req.activeCompanyName || null)
+                : addedReply?.user || getRequestDisplayName(req);
+        }
 
         // Send email notification for new reply
         try {
@@ -804,15 +895,24 @@ router.post('/ticket/:ticketId/reply', authenticateToken, async (req, res) => {
             console.error('Socket/FCM notification error:', socketError);
         }
 
+        const replyBase =
+            addedReply && typeof addedReply.toObject === 'function'
+                ? addedReply.toObject()
+                : { ...addedReply };
         res.status(201).json({
             message: 'Reply added successfully',
             reply: {
-                ...addedReply.toObject(),
+                ...replyBase,
                 userId: addedReply?.userId
-                    ? {
-                        ...(addedReply.userId.toObject ? addedReply.userId.toObject() : addedReply.userId),
-                        name: replyUserDisplayName
-                    }
+                    ? typeof addedReply.userId === 'object'
+                        ? {
+                            ...(addedReply.userId.toObject ? addedReply.userId.toObject() : addedReply.userId),
+                            name: replyUserDisplayName
+                        }
+                        : {
+                            _id: addedReply.userId,
+                            name: replyUserDisplayName
+                        }
                     : addedReply.userId,
                 user: replyUserDisplayName,
                 images: mapMediaUrls(addedReply.images, req)
@@ -844,34 +944,48 @@ router.get('/my-tickets', authenticateToken, async (req, res) => {
 
         const m = req.companyMembership;
         const canViewAllCompanyTickets = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
-        if (canViewAllCompanyTickets) {
-            // Admin and Manager can view all tickets (optionally filtered by projectId)
+
+        if (isPostgresPrimary()) {
+            const where = { companyId: activeCompanyId };
+            if (projectId) where.projectId = String(projectId);
+            if (!canViewAllCompanyTickets) {
+                const projectIds = await ticketSql.userAssignedProjectIds(req.user._id, activeCompanyId);
+                if (projectId) {
+                    if (!projectIds.some((id) => String(id) === String(projectId))) {
+                        return res.status(403).json({
+                            message: 'Access denied. You do not have access to this project'
+                        });
+                    }
+                    where.projectId = String(projectId);
+                } else {
+                    where.projectId = projectIds.length ? { [Op.in]: projectIds } : { [Op.in]: [] };
+                }
+            }
+            tickets = await ticketSql.findTicketsMany(where);
+        } else if (canViewAllCompanyTickets) {
             tickets = await Ticket.find(query)
                 .populate('project', 'project_name status')
                 .lean({ virtuals: true });
         } else {
-            // Regular users can only view tickets from their assigned projects
             const userProjects = await Project.find({ assigned_users: req.user._id, company: activeCompanyId })
                 .select('_id')
                 .lean();
             const projectIds = userProjects.map((project) => project._id);
-            
-            // If projectId is provided, verify user has access to that project
+
             if (projectId) {
-                if (!projectIds.some(id => id.toString() === projectId.toString())) {
+                if (!projectIds.some((id) => id.toString() === projectId.toString())) {
                     return res.status(403).json({ message: 'Access denied. You do not have access to this project' });
                 }
                 query.project = projectId;
             } else {
                 query.project = { $in: projectIds };
             }
-            
+
             tickets = await Ticket.find(query)
                 .populate('project', 'project_name status')
                 .lean({ virtuals: true });
         }
 
-        // Remove "images" from each ticket
         const ticketsWithoutImages = tickets.map((ticket) => {
             const { images: _omit, ...rest } = ticket;
             return rest;
@@ -892,29 +1006,36 @@ router.get('/my-active-tickets', authenticateToken, async (req, res) => {
         }
         const userEmail = req.user.email.toLowerCase();
 
-        // Find tickets where:
-        // 1. User email is in handler array (CC) OR user email equals requested_to_email (sendTo)
-        // 2. Status is NOT 'resolved' or 'closed'
-        const tickets = await Ticket.find({
-            company: activeCompanyId,
-            $and: [
-                {
-                    $or: [
-                        { handler: userEmail },
-                        { requested_to_email: userEmail }
-                    ]
-                },
-                {
-                    status: { $nin: ['resolved', 'closed'] }
-                }
-            ]
-        })
-            .populate('project', 'project_name status')
-            .lean({ virtuals: true });
+        let tickets;
+        if (isPostgresPrimary()) {
+            const open = await ticketSql.findTicketsMany({
+                companyId: activeCompanyId,
+                status: { [Op.notIn]: ['resolved', 'closed'] }
+            });
+            tickets = open.filter(
+                (t) =>
+                    (Array.isArray(t.handler) && t.handler.map((h) => String(h).toLowerCase()).includes(userEmail)) ||
+                    String(t.requested_to_email || '').toLowerCase() === userEmail
+            );
+        } else {
+            tickets = await Ticket.find({
+                company: activeCompanyId,
+                $and: [
+                    {
+                        $or: [{ handler: userEmail }, { requested_to_email: userEmail }]
+                    },
+                    {
+                        status: { $nin: ['resolved', 'closed'] }
+                    }
+                ]
+            })
+                .populate('project', 'project_name status')
+                .lean({ virtuals: true });
+        }
 
-        res.json({ 
+        res.json({
             tickets: tickets.map((ticket) => hydrateTicketMediaUrls(req, ticket)),
-            count: tickets.length 
+            count: tickets.length
         });
     } catch (error) {
         console.error('Get my active tickets error:', error);
@@ -931,10 +1052,15 @@ router.get('/search/:ticketPattern', authenticateToken, async (req, res) => {
         }
         const { ticketPattern } = req.params;
 
-        const tickets = await Ticket.find({ 
-            company: activeCompanyId,
-            ticket: { $regex: ticketPattern, $options: 'i' } 
-        }).lean({ virtuals: true });
+        const tickets = isPostgresPrimary()
+            ? await ticketSql.findTicketsMany({
+                companyId: activeCompanyId,
+                ticket: { [Op.iLike]: `%${ticketPattern}%` }
+            })
+            : await Ticket.find({
+                company: activeCompanyId,
+                ticket: { $regex: ticketPattern, $options: 'i' }
+            }).lean({ virtuals: true });
 
         res.json({ tickets });
     } catch (error) {
@@ -952,25 +1078,25 @@ router.get('/ticket/:ticketId/comments', authenticateToken, async (req, res) => 
         }
         const { ticketId } = req.params;
 
-        // Find ticket and populate safely (replies might not exist on old tickets)
-        const ticket = await Ticket.findOne({ _id: ticketId, company: activeCompanyId })
-            .populate('project', 'project_name status');
-        
-        // Only populate replies.userId if replies exist
-        if (ticket && ticket.replies && ticket.replies.length > 0) {
-            await ticket.populate('replies.userId', 'name email title role companies');
+        let ticket;
+        if (isPostgresPrimary()) {
+            ticket = await ticketSql.loadTicketGraph(ticketId, activeCompanyId);
+        } else {
+            ticket = await Ticket.findOne({ _id: ticketId, company: activeCompanyId })
+                .populate('project', 'project_name status');
+
+            if (ticket && ticket.replies && ticket.replies.length > 0) {
+                await ticket.populate('replies.userId', 'name email title role companies');
+            }
         }
 
         if (!ticket) {
             return res.status(404).json({ message: 'Ticket not found' });
         }
 
-        // Get all comments (old comment + replies)
-        // Handle both old tickets (without replies field) and new tickets
         let allComments = [];
-        
+
         try {
-            // Use virtual field if available
             allComments = ticket.allComments || [];
         } catch (virtualError) {
             // Fallback: manually build comments array if virtual fails
@@ -1046,7 +1172,9 @@ router.get('/:ticketId', authenticateToken, async (req, res) => {
         }
         const { ticketId } = req.params;
 
-        const ticket = await Ticket.findOne({ _id: ticketId, company: activeCompanyId }).lean({ virtuals: true });
+        const ticket = isPostgresPrimary()
+            ? await ticketSql.loadTicketGraph(ticketId, activeCompanyId)
+            : await Ticket.findOne({ _id: ticketId, company: activeCompanyId }).lean({ virtuals: true });
         if (!ticket) {
             return res.status(404).json({ message: 'Ticket not found' });
         }
@@ -1070,10 +1198,23 @@ router.get('/filter/status/:status', authenticateToken, async (req, res) => {
 
         const m = req.companyMembership;
         const canViewAllCompanyTickets = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
-        if (canViewAllCompanyTickets) {
+        if (isPostgresPrimary()) {
+            const all = await ticketSql.findTicketsMany({ companyId: activeCompanyId, status });
+            if (canViewAllCompanyTickets) {
+                tickets = all;
+            } else {
+                const em = req.user.email.toLowerCase();
+                tickets = all.filter(
+                    (t) =>
+                        t.requested_from === req.user.email ||
+                        t.requested_to === req.user.email ||
+                        (Array.isArray(t.handler) && t.handler.map((h) => String(h).toLowerCase()).includes(em))
+                );
+            }
+        } else if (canViewAllCompanyTickets) {
             tickets = await Ticket.find({ company: activeCompanyId, status }).lean({ virtuals: true });
         } else {
-            tickets = await Ticket.find({ 
+            tickets = await Ticket.find({
                 company: activeCompanyId,
                 status,
                 $or: [
@@ -1104,7 +1245,9 @@ router.get('/', authenticateToken, async (req, res) => {
             return res.status(403).json({ message: 'Access denied. Owner/Admin/Manager role required in active company' });
         }
 
-        const tickets = await Ticket.find({ company: activeCompanyId }).lean({ virtuals: true });
+        const tickets = isPostgresPrimary()
+            ? await ticketSql.findTicketsMany({ companyId: activeCompanyId })
+            : await Ticket.find({ company: activeCompanyId }).lean({ virtuals: true });
         res.json({ tickets: tickets.map((ticket) => hydrateTicketMediaUrls(req, ticket)) });
     } catch (error) {
         console.error('Get all tickets error:', error);

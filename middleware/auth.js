@@ -1,6 +1,8 @@
 const jwt = require('jsonwebtoken');
 const { User, Company } = require('../models');
 const { evaluateAndSyncCompanySubscription } = require('../services/subscriptionService');
+const { isPostgresPrimary } = require('../services/sql/runtime');
+const authSql = require('../services/sql/authSql');
 const { t } = require('../utils/i18n');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
@@ -77,7 +79,9 @@ const authenticateToken = async (req, res, next) => {
         }
 
         const decoded = jwt.verify(token, JWT_SECRET);
-        const user = await User.findById(decoded.userId).select('-password');
+        const user = isPostgresPrimary()
+            ? await authSql.findUserById(decoded.userId)
+            : await User.findById(decoded.userId).select('-password');
         
         if (!user) {
             return res.status(401).json({ message: 'Invalid token' });
@@ -102,9 +106,11 @@ const authenticateToken = async (req, res, next) => {
         }
 
         if (req.companyId) {
-            const company = await Company.findById(req.companyId).select(
-                'name subscription platformStatus deletedAt'
-            );
+            const company = isPostgresPrimary()
+                ? await authSql.loadCompanyForSubscription(req.companyId)
+                : await Company.findById(req.companyId).select(
+                    'name subscription platformStatus deletedAt'
+                );
             if (!company) {
                 return res.status(404).json({ message: 'Company not found' });
             }

@@ -12,6 +12,9 @@ const {
     refreshPlanCatalogCache,
     getPlansSourceList
 } = require('../services/subscriptionService');
+const { isPostgresPrimary } = require('../services/sql/runtime');
+const platformAdminSql = require('../services/sql/platformAdminSql');
+const { getSequelizeModels } = require('../db/postgres');
 
 const router = express.Router();
 
@@ -120,6 +123,9 @@ const buildCompaniesGrowthSeries = (companies, days = 30) => {
 };
 
 async function applyCompanyPlanChange(companyId, planId) {
+    if (isPostgresPrimary()) {
+        return platformAdminSql.applyCompanyPlanChangeSql(companyId, planId);
+    }
     const next = String(planId || '').toLowerCase();
     if (!PLAN_IDS.includes(next)) {
         const err = new Error('Invalid planId');
@@ -163,6 +169,10 @@ router.use(requirePlatformAdmin);
 /** Short list for admin UI filters (name + id). */
 router.get('/companies-for-select', async (req, res) => {
     try {
+        if (isPostgresPrimary()) {
+            const items = await platformAdminSql.companiesForSelect();
+            return res.json({ items });
+        }
         const rows = await Company.find({ deletedAt: null })
             .select('name')
             .sort({ name: 1 })
@@ -177,6 +187,10 @@ router.get('/companies-for-select', async (req, res) => {
 
 router.get('/overview', async (req, res) => {
     try {
+        if (isPostgresPrimary()) {
+            const payload = await platformAdminSql.overviewPayload(PAID_PLAN_IDS);
+            return res.json(payload);
+        }
         const companies = await Company.find({}).lean();
         const n = now();
         const sevenAgo = new Date(n);
@@ -380,6 +394,22 @@ router.get('/companies', async (req, res) => {
             }
         ];
 
+        if (isPostgresPrimary()) {
+            const out = await platformAdminSql.getAdminCompaniesList({
+                page,
+                limit,
+                search,
+                plan,
+                status,
+                activity,
+                sortField,
+                sortDir,
+                includeDeleted,
+                PAID_PLAN_IDS
+            });
+            return res.json(out);
+        }
+
         const agg = await Company.aggregate(pipeline);
         const facet = agg[0] || { rows: [], total: [] };
         const total = facet.total?.[0]?.n ?? 0;
@@ -414,6 +444,15 @@ router.get('/companies', async (req, res) => {
 
 router.patch('/companies/:id/suspend', async (req, res) => {
     try {
+        if (isPostgresPrimary()) {
+            const m = getSequelizeModels();
+            const [n] = await m.Company.update(
+                { platformStatus: 'suspended' },
+                { where: { id: String(req.params.id) } }
+            );
+            if (!n) return res.status(404).json({ message: 'Company not found' });
+            return res.json({ ok: true, id: String(req.params.id), platformStatus: 'suspended' });
+        }
         const c = await Company.findById(req.params.id);
         if (!c) return res.status(404).json({ message: 'Company not found' });
         c.platformStatus = 'suspended';
@@ -427,6 +466,15 @@ router.patch('/companies/:id/suspend', async (req, res) => {
 
 router.patch('/companies/:id/activate', async (req, res) => {
     try {
+        if (isPostgresPrimary()) {
+            const m = getSequelizeModels();
+            const [n] = await m.Company.update(
+                { platformStatus: 'active' },
+                { where: { id: String(req.params.id) } }
+            );
+            if (!n) return res.status(404).json({ message: 'Company not found' });
+            return res.json({ ok: true, id: String(req.params.id), platformStatus: 'active' });
+        }
         const c = await Company.findById(req.params.id);
         if (!c) return res.status(404).json({ message: 'Company not found' });
         c.platformStatus = 'active';
@@ -461,6 +509,16 @@ router.patch('/companies/:id/plan', async (req, res) => {
 
 router.patch('/companies/:id/soft-delete', async (req, res) => {
     try {
+        if (isPostgresPrimary()) {
+            const m = getSequelizeModels();
+            const ts = now();
+            const [n] = await m.Company.update(
+                { deletedAt: ts },
+                { where: { id: String(req.params.id) } }
+            );
+            if (!n) return res.status(404).json({ message: 'Company not found' });
+            return res.json({ ok: true, id: String(req.params.id), deletedAt: ts });
+        }
         const c = await Company.findById(req.params.id);
         if (!c) return res.status(404).json({ message: 'Company not found' });
         c.deletedAt = now();
@@ -502,6 +560,20 @@ router.get('/users', async (req, res) => {
         }
         if (accountStatus === 'banned') match.accountStatus = 'banned';
         if (accountStatus === 'active') match.accountStatus = { $in: [null, 'active'] };
+
+        if (isPostgresPrimary()) {
+            const out = await platformAdminSql.listUsersAdmin({
+                page,
+                limit,
+                search,
+                companyId,
+                role,
+                accountStatus,
+                sortField,
+                sortDir
+            });
+            return res.json(out);
+        }
 
         const sort = {};
         if (sortField === 'email') sort.email = sortDir;
@@ -545,6 +617,11 @@ router.get('/users/:id', async (req, res) => {
         if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
             return res.status(400).json({ message: 'Invalid user id' });
         }
+        if (isPostgresPrimary()) {
+            const detail = await platformAdminSql.getUserDetailAdmin(req.params.id);
+            if (!detail) return res.status(404).json({ message: 'User not found' });
+            return res.json(detail);
+        }
         const u = await User.findById(req.params.id)
             .select('-password -fcmTokens')
             .populate('companies.company', 'name email subscription')
@@ -584,6 +661,16 @@ router.get('/users/:id', async (req, res) => {
 
 router.patch('/users/:id/ban', async (req, res) => {
     try {
+        if (isPostgresPrimary()) {
+            const m = getSequelizeModels();
+            const u = await m.User.findByPk(String(req.params.id));
+            if (!u) return res.status(404).json({ message: 'User not found' });
+            if (String(u.id) === String(req.user._id)) {
+                return res.status(400).json({ message: 'Cannot ban yourself' });
+            }
+            await u.update({ accountStatus: 'banned' });
+            return res.json({ ok: true, id: String(u.id), accountStatus: 'banned' });
+        }
         const u = await User.findById(req.params.id);
         if (!u) return res.status(404).json({ message: 'User not found' });
         if (String(u._id) === String(req.user._id)) {
@@ -600,6 +687,13 @@ router.patch('/users/:id/ban', async (req, res) => {
 
 router.patch('/users/:id/unban', async (req, res) => {
     try {
+        if (isPostgresPrimary()) {
+            const m = getSequelizeModels();
+            const u = await m.User.findByPk(String(req.params.id));
+            if (!u) return res.status(404).json({ message: 'User not found' });
+            await u.update({ accountStatus: 'active' });
+            return res.json({ ok: true, id: String(u.id), accountStatus: 'active' });
+        }
         const u = await User.findById(req.params.id);
         if (!u) return res.status(404).json({ message: 'User not found' });
         u.accountStatus = 'active';
@@ -618,6 +712,18 @@ router.get('/subscriptions', async (req, res) => {
         const search = String(req.query.search || '').trim();
         const sortField = String(req.query.sort || 'nextbilling').toLowerCase();
         const sortDir = String(req.query.order || 'asc').toLowerCase() === 'desc' ? -1 : 1;
+
+        if (isPostgresPrimary()) {
+            const out = await platformAdminSql.listSubscriptionsAdmin({
+                page,
+                limit,
+                search,
+                sortField,
+                sortDir,
+                PAID_PLAN_IDS
+            });
+            return res.json(out);
+        }
 
         const match = { deletedAt: null, 'subscription.planId': { $in: PAID_PLAN_IDS } };
         if (search) match.name = { $regex: escapeRegex(search), $options: 'i' };
@@ -751,6 +857,10 @@ router.get('/plan-catalog', async (req, res) => {
     try {
         await refreshPlanCatalogCache();
         const plans = getPlansSourceList();
+        if (isPostgresPrimary()) {
+            const overrides = await platformAdminSql.planCatalogOverridesList();
+            return res.json({ plans, basePlans: SUBSCRIPTION_PLANS, overrides });
+        }
         const overrides = await PlanCatalogOverride.find({}).lean();
         res.json({ plans, basePlans: SUBSCRIPTION_PLANS, overrides });
     } catch (e) {
@@ -786,6 +896,15 @@ router.put('/plan-catalog/:planId', async (req, res) => {
                 set[k] = body[k];
             }
         });
+        if (isPostgresPrimary()) {
+            await platformAdminSql.planCatalogUpsert(planId, set);
+            await refreshPlanCatalogCache();
+            const plan = getPlanById(planId);
+            const override = await platformAdminSql.planCatalogOverridesList().then((rows) =>
+                rows.find((r) => r.planId === planId)
+            );
+            return res.json({ ok: true, plan, override });
+        }
         await PlanCatalogOverride.findOneAndUpdate(
             { planId },
             { $set: set },
@@ -807,6 +926,11 @@ router.delete('/plan-catalog/:planId', async (req, res) => {
         const planId = String(req.params.planId || '').toLowerCase();
         if (!PLAN_IDS.includes(planId)) {
             return res.status(400).json({ message: 'Invalid planId' });
+        }
+        if (isPostgresPrimary()) {
+            await platformAdminSql.planCatalogDelete(planId);
+            await refreshPlanCatalogCache();
+            return res.json({ ok: true, plan: getPlanById(planId) });
         }
         await PlanCatalogOverride.deleteOne({ planId });
         await refreshPlanCatalogCache();

@@ -6,6 +6,10 @@ const { createNotification } = require('../services/notificationService');
 const { authenticateToken, canBypassProjectAssignment, getRequestDisplayName } = require('../middleware/auth');
 const { getCompanyPlan } = require('../services/subscriptionService');
 const { toAbsoluteMediaUrl } = require('../utils/mediaUrl');
+const { isPostgresPrimary } = require('../services/sql/runtime');
+const chatSql = require('../services/sql/chatSql');
+const authSql = require('../services/sql/authSql');
+const projectSql = require('../services/sql/projectSql');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
@@ -177,7 +181,12 @@ const ensureChatAttachmentAllowed = async (req, res, next) => {
             return res.status(400).json({ message: 'Active company required' });
         }
 
-        const company = await Company.findById(activeCompanyId).select('subscription');
+        let company;
+        if (isPostgresPrimary()) {
+            company = await authSql.loadCompanyForSubscription(activeCompanyId);
+        } else {
+            company = await Company.findById(activeCompanyId).select('subscription');
+        }
         if (!company) {
             return res.status(404).json({ message: 'Company not found' });
         }
@@ -212,6 +221,32 @@ router.post('/conversation', authenticateToken, async (req, res) => {
 
         if (participantId === req.user._id.toString()) {
             return res.status(400).json({ message: 'Cannot create conversation with yourself' });
+        }
+
+        if (isPostgresPrimary()) {
+            const participant = await authSql.findUserById(participantId);
+            if (!participant) {
+                return res.status(404).json({ message: 'Participant not found' });
+            }
+            const participantInCompany = (participant.companies || []).some(
+                (m) => membershipCompanyId(m) === activeCompanyId
+            );
+            if (!participantInCompany) {
+                return res.status(403).json({ message: 'Participant is not in active company' });
+            }
+            const conversation = await chatSql.ensureDirectConversation(
+                activeCompanyId,
+                req.user._id,
+                participantId,
+                req.user._id
+            );
+            return res.json({
+                conversation: attachConversationDisplayNames(
+                    conversation,
+                    activeCompanyId,
+                    req.activeCompanyName || null
+                )
+            });
         }
 
         // Check if participant exists
@@ -264,6 +299,42 @@ router.get('/project/:projectId', authenticateToken, async (req, res) => {
         const activeCompanyId = req.companyId ? req.companyId.toString() : null;
         if (!activeCompanyId) {
             return res.status(400).json({ message: 'Active company required' });
+        }
+
+        if (isPostgresPrimary()) {
+            const project = await projectSql.getProjectByIdWithAssignees(projectId);
+            if (!project || String(project.company) !== String(activeCompanyId)) {
+                return res.status(404).json({ message: 'Project not found' });
+            }
+            const isAssigned = project.assigned_users.some(
+                (user) => String(user._id || user.id) === req.user._id.toString()
+            );
+            if (!isAssigned && !canBypassProjectAssignment(req)) {
+                return res.status(403).json({ message: 'You are not assigned to this project' });
+            }
+            const conversation = await chatSql.ensureProjectChatConversation(
+                activeCompanyId,
+                project,
+                req.user._id
+            );
+            const userIdKey = req.user._id.toString();
+            const readUnread = (raw) => {
+                if (raw == null) return 0;
+                if (typeof raw.get === 'function') return Number(raw.get(userIdKey)) || 0;
+                return Number(raw[userIdKey]) || 0;
+            };
+            const unread = readUnread(conversation.unreadCount);
+            const conversationWithDisplayNames = attachConversationDisplayNames(
+                conversation,
+                activeCompanyId,
+                req.activeCompanyName || null
+            );
+            return res.json({
+                conversation: {
+                    ...conversationWithDisplayNames,
+                    unreadCount: unread
+                }
+            });
         }
 
         // Verify project exists
@@ -337,6 +408,15 @@ router.get('/users', authenticateToken, async (req, res) => {
         if (!activeCompanyId) {
             return res.status(400).json({ message: 'Active company required' });
         }
+
+        if (isPostgresPrimary()) {
+            const users = await chatSql.listUsersForChat(activeCompanyId, req.user._id);
+            const company = await authSql.findCompanyById(activeCompanyId);
+            return res.json({
+                users: users.map((u) => attachUserDisplayName(u, activeCompanyId, company?.name || null))
+            });
+        }
+
         const users = await User.find({
             _id: { $ne: req.user._id },
             'companies.company': activeCompanyId
@@ -362,6 +442,40 @@ router.get('/conversations', authenticateToken, async (req, res) => {
         if (!activeCompanyId) {
             return res.status(400).json({ message: 'Active company required' });
         }
+
+        if (isPostgresPrimary()) {
+            const conversations = await chatSql.syncProjectConversationsAndList(
+                activeCompanyId,
+                req.user._id,
+                req.activeCompanyName || null
+            );
+            const userIdKey = req.user._id.toString();
+            const readUnread = (raw) => {
+                if (raw == null) return 0;
+                if (typeof raw.get === 'function') return Number(raw.get(userIdKey)) || 0;
+                return Number(raw[userIdKey]) || 0;
+            };
+            const conversationsWithUnread = conversations.map((conv) => {
+                const unread = readUnread(conv.unreadCount);
+                const conversationObj = attachConversationDisplayNames(
+                    conv,
+                    activeCompanyId,
+                    req.activeCompanyName || null
+                );
+                if (conversationObj.lastMessage?.fileUrl) {
+                    conversationObj.lastMessage.fileUrl = toAbsoluteMediaUrl(
+                        conversationObj.lastMessage.fileUrl,
+                        req
+                    );
+                }
+                return {
+                    ...conversationObj,
+                    unreadCount: unread
+                };
+            });
+            return res.json({ conversations: conversationsWithUnread });
+        }
+
         // First, ensure all projects the user is assigned to have conversations
         const userProjects = await Project.find({
             assigned_users: req.user._id,
@@ -475,6 +589,46 @@ router.get('/conversation/:conversationId/messages', authenticateToken, async (r
         }
         const { conversationId } = req.params;
         const { page = 1, limit = 50, cursor } = req.query;
+
+        if (isPostgresPrimary()) {
+            const m = chatSql.requireModels();
+            const convRow = await m.Conversation.findOne({
+                where: { id: String(conversationId), companyId: String(activeCompanyId) }
+            });
+            if (!convRow) {
+                return res.status(404).json({ message: 'Conversation not found' });
+            }
+            if (!(await chatSql.isUserInConversation(conversationId, req.user._id))) {
+                return res.status(403).json({ message: 'Access denied' });
+            }
+            const cursorDate = cursor ? new Date(cursor) : null;
+            const useCursor = cursorDate && Number.isFinite(cursorDate.getTime());
+            const { messages, hasMore, nextCursor } = await chatSql.fetchMessagesPage({
+                companyId: activeCompanyId,
+                conversationId,
+                page,
+                limit,
+                cursor
+            });
+            await chatSql.markConversationMessagesRead(
+                activeCompanyId,
+                conversationId,
+                req.user._id
+            );
+            const messagesWithDisplayNames = attachMessagesDisplayName(
+                messages,
+                activeCompanyId,
+                req.activeCompanyName || null
+            );
+            const payload = {
+                messages: hydrateMessagesFileUrls(req, messagesWithDisplayNames),
+                hasMore
+            };
+            if (useCursor) {
+                payload.nextCursor = nextCursor;
+            }
+            return res.json(payload);
+        }
 
         // Verify user is part of the conversation
         const conversation = await Conversation.findOne({ _id: conversationId, company: activeCompanyId });
@@ -591,6 +745,75 @@ router.post('/message', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: 'Conversation ID and content are required' });
         }
 
+        if (isPostgresPrimary()) {
+            const m = chatSql.requireModels();
+            const convRow = await m.Conversation.findOne({
+                where: { id: String(conversationId), companyId: String(activeCompanyId) }
+            });
+            if (!convRow) {
+                return res.status(404).json({ message: 'Conversation not found' });
+            }
+            if (!(await chatSql.isUserInConversation(conversationId, req.user._id))) {
+                return res.status(403).json({ message: 'Access denied' });
+            }
+            const messagePayload = await chatSql.createTextMessage({
+                companyId: activeCompanyId,
+                conversationId,
+                senderId: req.user._id,
+                senderName: getRequestDisplayName(req),
+                senderEmail: req.user.email,
+                content,
+                replyToId: replyTo || null,
+                mentionIds: mentions || []
+            });
+            const io = req.app.get('io');
+            const senderName = getRequestDisplayName(req);
+            const textPreview = (content || '').slice(0, 100);
+            const participantIds = await chatSql.participantUserIds(conversationId);
+            if (io) {
+                for (const participantId of participantIds) {
+                    if (String(participantId) !== req.user._id.toString()) {
+                        io.to(`user:${participantId}`).emit('new_chat_message', {
+                            type: 'new_chat_message',
+                            conversationId: conversationId,
+                            message: messagePayload,
+                            timestamp: new Date()
+                        });
+                    }
+                }
+            }
+            try {
+                const otherParticipantIds = participantIds.filter(
+                    (pid) => String(pid) !== req.user._id.toString()
+                );
+                const participantMap = await fetchUsersByIdMap(otherParticipantIds);
+                for (const participantId of otherParticipantIds) {
+                    const participantUser = participantMap.get(String(participantId));
+                    if (!participantUser) continue;
+                    await createNotification(
+                        participantUser._id,
+                        {
+                            company: activeCompanyId,
+                            type: 'chat_message',
+                            title: `New message from ${senderName}`,
+                            body: textPreview || 'New chat message',
+                            data: { conversationId: String(conversationId) }
+                        },
+                        { userDoc: participantUser }
+                    );
+                }
+            } catch (fcmError) {
+                console.error('FCM error for chat text message:', fcmError);
+            }
+            return res.status(201).json({
+                message: attachMessageDisplayName(
+                    messagePayload,
+                    activeCompanyId,
+                    req.activeCompanyName || null
+                )
+            });
+        }
+
         // Verify user is part of the conversation
         const conversation = await Conversation.findOne({ _id: conversationId, company: activeCompanyId });
         if (!conversation) {
@@ -696,6 +919,43 @@ router.put('/message/:messageId', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: 'Content is required' });
         }
 
+        if (isPostgresPrimary()) {
+            const result = await chatSql.updateMessageContent(
+                activeCompanyId,
+                messageId,
+                req.user._id,
+                content
+            );
+            if (result.error === 'not_found') {
+                return res.status(404).json({ message: 'Message not found' });
+            }
+            if (result.error === 'forbidden') {
+                return res.status(403).json({ message: 'You can only edit your own messages' });
+            }
+            if (result.error === 'not_text') {
+                return res.status(400).json({ message: 'Only text messages can be edited' });
+            }
+            const messageObj = result.message;
+            const participantIds = await chatSql.participantUserIds(result.conversationId);
+            const io = req.app.get('io');
+            if (io) {
+                for (const participantId of participantIds) {
+                    io.to(`user:${participantId}`).emit('message_updated', {
+                        type: 'message_updated',
+                        conversationId: result.conversationId,
+                        message: messageObj
+                    });
+                }
+            }
+            return res.json({
+                message: attachMessageDisplayName(
+                    messageObj,
+                    activeCompanyId,
+                    req.activeCompanyName || null
+                )
+            });
+        }
+
         const message = await Message.findOne({ _id: messageId, company: activeCompanyId });
         if (!message) {
             return res.status(404).json({ message: 'Message not found' });
@@ -750,6 +1010,28 @@ router.delete('/message/:messageId', authenticateToken, async (req, res) => {
         }
         const { messageId } = req.params;
 
+        if (isPostgresPrimary()) {
+            const result = await chatSql.softDeleteMessage(activeCompanyId, messageId, req.user._id);
+            if (result.error === 'not_found') {
+                return res.status(404).json({ message: 'Message not found' });
+            }
+            if (result.error === 'forbidden') {
+                return res.status(403).json({ message: 'You can only delete your own messages' });
+            }
+            const participantIds = await chatSql.participantUserIds(result.conversationId);
+            const io = req.app.get('io');
+            if (io) {
+                for (const participantId of participantIds) {
+                    io.to(`user:${participantId}`).emit('message_deleted', {
+                        type: 'message_deleted',
+                        conversationId: result.conversationId,
+                        messageId: messageId
+                    });
+                }
+            }
+            return res.json({ message: 'Message deleted successfully' });
+        }
+
         const message = await Message.findOne({ _id: messageId, company: activeCompanyId });
         if (!message) {
             return res.status(404).json({ message: 'Message not found' });
@@ -795,6 +1077,33 @@ router.post('/message/:messageId/reaction', authenticateToken, async (req, res) 
 
         if (!emoji) {
             return res.status(400).json({ message: 'Emoji is required' });
+        }
+
+        if (isPostgresPrimary()) {
+            const result = await chatSql.toggleReaction(activeCompanyId, messageId, req.user._id, emoji);
+            if (result.error === 'not_found') {
+                return res.status(404).json({ message: 'Message not found' });
+            }
+            const participantIds = await chatSql.participantUserIds(result.conversationId);
+            const io = req.app.get('io');
+            if (io) {
+                for (const participantId of participantIds) {
+                    io.to(`user:${participantId}`).emit('message_reaction_updated', {
+                        type: 'message_reaction_updated',
+                        conversationId: result.conversationId,
+                        messageId: messageId,
+                        reactions: result.reactions
+                    });
+                }
+            }
+            return res.json({
+                messageId: result.messageId,
+                reactions: attachMessageDisplayName(
+                    { reactions: result.reactions },
+                    activeCompanyId,
+                    req.activeCompanyName || null
+                ).reactions
+            });
         }
 
         const message = await Message.findOne({ _id: messageId, company: activeCompanyId });
@@ -859,6 +1168,67 @@ router.post('/message/:messageId/thread', authenticateToken, async (req, res) =>
         }
         const { messageId } = req.params;
         const { content, type = 'text', fileUrl, fileName, fileSize, mimeType } = req.body;
+
+        if (isPostgresPrimary()) {
+            const m = chatSql.requireModels();
+            const parentRow = await m.Message.findOne({
+                where: { id: String(messageId), companyId: String(activeCompanyId) }
+            });
+            if (!parentRow) {
+                return res.status(404).json({ message: 'Parent message not found' });
+            }
+            const convId = parentRow.conversationId;
+            const convRow = await m.Conversation.findOne({
+                where: { id: String(convId), companyId: String(activeCompanyId) }
+            });
+            if (!convRow) {
+                return res.status(404).json({ message: 'Conversation not found' });
+            }
+            if (!(await chatSql.isUserInConversation(convId, req.user._id))) {
+                return res.status(403).json({ message: 'Access denied' });
+            }
+            const threadResult = await chatSql.createThreadReply({
+                companyId: activeCompanyId,
+                conversationId: convId,
+                parentMessageId: messageId,
+                senderId: req.user._id,
+                senderName: getRequestDisplayName(req),
+                senderEmail: req.user.email,
+                type,
+                content,
+                fileUrl: toAbsoluteMediaUrl(fileUrl, req),
+                fileName,
+                fileSize,
+                mimeType
+            });
+            if (threadResult.error === 'parent_not_found') {
+                return res.status(404).json({ message: 'Parent message not found' });
+            }
+            const io = req.app.get('io');
+            if (io) {
+                const participantIds = await chatSql.participantUserIds(convId);
+                for (const participantId of participantIds) {
+                    io.to(`user:${participantId}`).emit('thread_reply', {
+                        type: 'thread_reply',
+                        conversationId: convId,
+                        parentMessageId: messageId,
+                        message: threadResult.message,
+                        threadCount: threadResult.threadCount
+                    });
+                }
+            }
+            return res.status(201).json({
+                message: hydrateMessageFileUrl(
+                    req,
+                    attachMessageDisplayName(
+                        threadResult.message,
+                        activeCompanyId,
+                        req.activeCompanyName || null
+                    )
+                ),
+                threadCount: threadResult.threadCount
+            });
+        }
 
         // Validate parent message exists
         const parentMessage = await Message.findOne({ _id: messageId, company: activeCompanyId });
@@ -935,6 +1305,38 @@ router.get('/message/:messageId/thread', authenticateToken, async (req, res) => 
             return res.status(400).json({ message: 'Active company required' });
         }
         const { messageId } = req.params;
+
+        if (isPostgresPrimary()) {
+            const page = await chatSql.getThreadPage(activeCompanyId, messageId);
+            if (page.error === 'not_found') {
+                return res.status(404).json({ message: 'Parent message not found' });
+            }
+            const convId = page.parentMessage.conversation;
+            const convRow = await chatSql.requireModels().Conversation.findOne({
+                where: { id: String(convId), companyId: String(activeCompanyId) }
+            });
+            if (!convRow) {
+                return res.status(404).json({ message: 'Conversation not found' });
+            }
+            if (!(await chatSql.isUserInConversation(convId, req.user._id))) {
+                return res.status(403).json({ message: 'Access denied' });
+            }
+            const parentWithDisplayName = attachMessageDisplayName(
+                page.parentMessage,
+                activeCompanyId,
+                req.activeCompanyName || null
+            );
+            const threadWithDisplayNames = attachMessagesDisplayName(
+                page.threadReplies,
+                activeCompanyId,
+                req.activeCompanyName || null
+            );
+            return res.json({
+                parentMessage: hydrateMessageFileUrl(req, parentWithDisplayName),
+                threadReplies: hydrateMessagesFileUrls(req, threadWithDisplayNames),
+                threadCount: page.threadCount
+            });
+        }
 
         // Validate parent message exists
         const parentMessage = await Message.findOne({ _id: messageId, company: activeCompanyId })
@@ -1033,6 +1435,108 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
         }
         if (!fileUrl || !fileName) {
             return res.status(400).json({ message: 'fileUrl and fileName are required when sending file metadata' });
+        }
+
+        if (isPostgresPrimary()) {
+            const m = chatSql.requireModels();
+            const convRow = await m.Conversation.findOne({
+                where: { id: String(conversationId), companyId: String(activeCompanyId) }
+            });
+            if (!convRow) {
+                return res.status(404).json({ message: 'Conversation not found' });
+            }
+            if (!(await chatSql.isUserInConversation(conversationId, req.user._id))) {
+                return res.status(403).json({ message: 'Access denied' });
+            }
+            const replyToRaw = req.body.replyTo;
+            const messagePayload = await chatSql.createFileMessage({
+                companyId: activeCompanyId,
+                conversationId,
+                senderId: req.user._id,
+                senderName: getRequestDisplayName(req),
+                senderEmail: req.user.email,
+                type,
+                fileUrl,
+                fileName,
+                fileSize,
+                mimeType,
+                content: type === 'image' ? fileName : undefined,
+                replyToId: replyToRaw || null
+            });
+            const io = req.app.get('io');
+            const senderName = getRequestDisplayName(req);
+            const participantIds = await chatSql.participantUserIds(conversationId);
+            if (io) {
+                for (const participantId of participantIds) {
+                    const participantIdStr = String(participantId);
+                    if (participantIdStr !== req.user._id.toString()) {
+                        console.log(`Emitting new_chat_message (file) to user:${participantIdStr}`);
+                        io.to(`user:${participantIdStr}`).emit('new_chat_message', {
+                            type: 'new_chat_message',
+                            conversationId: conversationId,
+                            message: {
+                                _id: messagePayload.id,
+                                sender: {
+                                    _id: req.user._id,
+                                    name: senderName,
+                                    email: req.user.email
+                                },
+                                type: type,
+                                fileUrl: toAbsoluteMediaUrl(fileUrl, req),
+                                fileName: fileName,
+                                fileSize: fileSize,
+                                mimeType: mimeType,
+                                createdAt: messagePayload.createdAt
+                            },
+                            timestamp: new Date()
+                        });
+                    }
+                }
+            }
+            try {
+                const fileLabel =
+                    type === 'voice'
+                        ? 'Voice message'
+                        : type === 'image'
+                          ? 'Image'
+                          : type === 'video'
+                            ? 'Video'
+                            : 'File';
+
+                const otherParticipantIdsFile = participantIds.filter(
+                    (pid) => String(pid) !== req.user._id.toString()
+                );
+                const participantMapFile = await fetchUsersByIdMap(otherParticipantIdsFile);
+                for (const participantId of otherParticipantIdsFile) {
+                    const participantUser = participantMapFile.get(String(participantId));
+                    if (!participantUser) continue;
+
+                    await createNotification(
+                        participantUser._id,
+                        {
+                            company: activeCompanyId,
+                            type: 'chat_message',
+                            title: `New ${fileLabel} from ${senderName}`,
+                            body: fileName || fileLabel,
+                            data: { conversationId: String(conversationId) }
+                        },
+                        { userDoc: participantUser }
+                    );
+                }
+            } catch (fcmError) {
+                console.error('FCM error for chat file message:', fcmError);
+            }
+
+            return res.status(201).json({
+                message: hydrateMessageFileUrl(
+                    req,
+                    attachMessageDisplayName(
+                        messagePayload,
+                        activeCompanyId,
+                        req.activeCompanyName || null
+                    )
+                )
+            });
         }
 
         // Verify user is part of the conversation
@@ -1164,6 +1668,17 @@ router.post('/admin/create-project-conversations', authenticateToken, async (req
         const canManage = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
         if (!canManage) {
             return res.status(403).json({ message: 'Access denied' });
+        }
+
+        if (isPostgresPrimary()) {
+            const stats = await chatSql.adminSyncProjectConversations(activeCompanyId, req.user._id);
+            return res.json({
+                message: 'Project conversations processed',
+                created: stats.created,
+                updated: stats.updated,
+                existing: stats.existing,
+                total: stats.total
+            });
         }
 
         const projects = await Project.find({ company: activeCompanyId }).populate('assigned_users');

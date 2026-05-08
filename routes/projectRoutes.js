@@ -7,8 +7,12 @@ const {
     evaluateAndSyncCompanySubscription,
     canCreateMoreProjects
 } = require('../services/subscriptionService');
+const { isPostgresPrimary } = require('../services/sql/runtime');
+const authSql = require('../services/sql/authSql');
+const projectSql = require('../services/sql/projectSql');
 
 const router = express.Router();
+const normalizeProjectName = (name) => String(name || '').trim();
 const membershipCompanyId = (entry) => {
     if (!entry) return null;
     const raw = entry.companyId ?? entry.company;
@@ -55,12 +59,21 @@ router.post('/add-project', authenticateToken, async (req, res) => {
             return res.status(403).json({ message: 'Insufficient permissions' });
         }
 
-        const company = await Company.findById(activeCompanyId);
+        const normalizedProjectName = normalizeProjectName(project_name);
+        if (!normalizedProjectName || !start_date || !estimated_end_date) {
+            return res.status(400).json({ message: 'Project name, start date, and estimated end date are required' });
+        }
+
+        const company = isPostgresPrimary()
+            ? await authSql.loadCompanyForSubscription(activeCompanyId)
+            : await Company.findById(activeCompanyId);
         if (!company) {
             return res.status(404).json({ message: 'Company not found' });
         }
         await evaluateAndSyncCompanySubscription(company);
-        const projectCount = await Project.countDocuments({ company: activeCompanyId });
+        const projectCount = isPostgresPrimary()
+            ? await projectSql.countProjectsByCompany(activeCompanyId)
+            : await Project.countDocuments({ company: activeCompanyId });
         if (!canCreateMoreProjects(company, projectCount)) {
             const activePlan = getCompanyPlan(company);
             const maxProjects = activePlan.limits.maxProjects;
@@ -72,15 +85,12 @@ router.post('/add-project', authenticateToken, async (req, res) => {
             });
         }
 
-        const normalizedProjectName = normalizeProjectName(project_name);
-        if (!normalizedProjectName || !start_date || !estimated_end_date) {
-            return res.status(400).json({ message: 'Project name, start date, and estimated end date are required' });
-        }
-
-        const existingProject = await Project.findOne({
-            company: activeCompanyId,
-            project_name: normalizedProjectName
-        }).collation({ locale: 'en', strength: 2 });
+        const existingProject = isPostgresPrimary()
+            ? await projectSql.findProjectByNameCI(activeCompanyId, normalizedProjectName)
+            : await Project.findOne({
+                company: activeCompanyId,
+                project_name: normalizedProjectName
+            }).collation({ locale: 'en', strength: 2 });
         if (existingProject) {
             return res.status(409).json({
                 message: 'A project with this name already exists in your company'
@@ -93,19 +103,51 @@ router.post('/add-project', authenticateToken, async (req, res) => {
             ? Array.from(new Set([...incomingAssignedUsers.map((id) => id.toString()), creatorUserId]))
             : incomingAssignedUsers.map((id) => id.toString());
 
-        // Validate assigned users if provided
         if (normalizedAssignedUsers.length > 0) {
-            const validUsers = await User.find({ _id: { $in: normalizedAssignedUsers } });
-            console.log(normalizedAssignedUsers);
-            if (validUsers.length !== normalizedAssignedUsers.length) {
-                return res.status(400).json({ message: 'Some assigned users are invalid' });
-            }
+            if (isPostgresPrimary()) {
+                const v = await projectSql.validateUsersInCompany(normalizedAssignedUsers, activeCompanyId);
+                if (!v.ok || v.users.length !== normalizedAssignedUsers.length) {
+                    return res.status(400).json({ message: 'Some assigned users are invalid' });
+                }
+            } else {
+                const validUsers = await User.find({ _id: { $in: normalizedAssignedUsers } });
+                console.log(normalizedAssignedUsers);
+                if (validUsers.length !== normalizedAssignedUsers.length) {
+                    return res.status(400).json({ message: 'Some assigned users are invalid' });
+                }
 
-            const allBelongToCompany = validUsers.every((u) =>
-                (u.companies || []).some((entry) => membershipCompanyId(entry) === activeCompanyId)
-            );
-            if (!allBelongToCompany) {
-                return res.status(400).json({ message: 'Assigned users must belong to the active company' });
+                const allBelongToCompany = validUsers.every((u) =>
+                    (u.companies || []).some((entry) => membershipCompanyId(entry) === activeCompanyId)
+                );
+                if (!allBelongToCompany) {
+                    return res.status(400).json({ message: 'Assigned users must belong to the active company' });
+                }
+            }
+        }
+
+        if (isPostgresPrimary()) {
+            try {
+                const projectId = await projectSql.createProjectWithConversation({
+                    companyId: activeCompanyId,
+                    projectName: normalizedProjectName,
+                    startDate: new Date(start_date),
+                    endDate: new Date(estimated_end_date),
+                    assignedUserIds: normalizedAssignedUsers,
+                    groupAdminId: req.user._id
+                });
+                const newProject = await projectSql.getProjectByIdWithAssignees(projectId);
+                console.log(`Project conversation created for project: ${project_name}`);
+                return res.status(201).json({
+                    message: 'Project created successfully',
+                    project: enrichAssignedUsersDisplayName(
+                        newProject,
+                        activeCompanyId,
+                        req.activeCompanyName || null
+                    )
+                });
+            } catch (convError) {
+                console.error('Error creating project (SQL):', convError);
+                return res.status(500).json({ message: 'Internal server error' });
             }
         }
 
@@ -119,7 +161,6 @@ router.post('/add-project', authenticateToken, async (req, res) => {
 
         await newProject.save();
 
-        // Create project conversation group
         try {
             const projectConversation = new Conversation({
                 company: activeCompanyId,
@@ -133,10 +174,8 @@ router.post('/add-project', authenticateToken, async (req, res) => {
             console.log(`Project conversation created for project: ${project_name}`);
         } catch (convError) {
             console.error('Error creating project conversation:', convError);
-            // Don't fail project creation if conversation creation fails
         }
 
-        // Populate assigned users for response
         await newProject.populate('assigned_users', 'name title email role');
 
         res.status(201).json({
@@ -171,6 +210,40 @@ router.put('/assign-users/:projectId', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: 'Assigned users array is required' });
         }
 
+        if (isPostgresPrimary()) {
+            const project = await projectSql.getProjectByIdWithAssignees(projectId);
+            if (!project) {
+                return res.status(404).json({ message: 'Project not found' });
+            }
+            const pCompany = project.company || project.companyId;
+            if (!pCompany || String(pCompany) !== activeCompanyId) {
+                return res.status(403).json({ message: 'You can only manage projects in your active company' });
+            }
+            const v = await projectSql.validateUsersInCompany(assigned_users, activeCompanyId);
+            if (!v.ok || v.users.length !== assigned_users.length) {
+                return res.status(400).json({ message: 'Some assigned users are invalid' });
+            }
+            await projectSql.setProjectAssignees(projectId, assigned_users);
+            try {
+                await projectSql.syncConversationParticipantsForProject(
+                    activeCompanyId,
+                    projectId,
+                    assigned_users
+                );
+            } catch (convError) {
+                console.error('Error updating project conversation participants:', convError);
+            }
+            const refreshed = await projectSql.getProjectByIdWithAssignees(projectId);
+            return res.json({
+                message: 'Users assigned to project successfully',
+                project: enrichAssignedUsersDisplayName(
+                    refreshed,
+                    activeCompanyId,
+                    req.activeCompanyName || null
+                )
+            });
+        }
+
         const project = await Project.findById(projectId);
         if (!project) {
             return res.status(404).json({ message: 'Project not found' });
@@ -179,7 +252,6 @@ router.put('/assign-users/:projectId', authenticateToken, async (req, res) => {
             return res.status(403).json({ message: 'You can only manage projects in your active company' });
         }
 
-        // Validate assigned users
         const validUsers = await User.find({ _id: { $in: assigned_users } });
         if (validUsers.length !== assigned_users.length) {
             return res.status(400).json({ message: 'Some assigned users are invalid' });
@@ -194,7 +266,6 @@ router.put('/assign-users/:projectId', authenticateToken, async (req, res) => {
         project.assigned_users = assigned_users;
         await project.save();
 
-        // Update project conversation participants
         try {
             const projectConversation = await Conversation.findOne({ company: activeCompanyId, project: projectId });
             if (projectConversation) {
@@ -204,7 +275,6 @@ router.put('/assign-users/:projectId', authenticateToken, async (req, res) => {
             }
         } catch (convError) {
             console.error('Error updating project conversation participants:', convError);
-            // Don't fail user assignment if conversation update fails
         }
 
         await project.populate('assigned_users', 'name title email role');
@@ -230,48 +300,69 @@ router.get('/my-projects', authenticateToken, async (req, res) => {
             });
         }
 
-        let projects;
-
         const m = req.companyMembership;
         const canViewAllCompanyProjects = m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole));
-        if (canViewAllCompanyProjects) {
-            projects = await Project.find({ company: activeCompanyId }).populate('assigned_users', 'name title email role');
+
+        let projectsWithCounts;
+        if (isPostgresPrimary()) {
+            const projects = await projectSql.listProjectsWithAssignees({
+                companyId: activeCompanyId,
+                userId: req.user._id,
+                canViewAll: canViewAllCompanyProjects
+            });
+            const projectIds = projects.map((p) => p._id);
+            const countByProject = await projectSql.ticketCountsByProject(activeCompanyId, projectIds);
+            projectsWithCounts = projects.map((project) => {
+                const counts = countByProject[String(project._id)] || { totalTickets: 0, openedTickets: 0 };
+                return {
+                    ...enrichAssignedUsersDisplayName(project, activeCompanyId, req.activeCompanyName || null),
+                    totalTickets: counts.totalTickets,
+                    openedTickets: counts.openedTickets
+                };
+            });
         } else {
-            projects = await Project.find({
-                company: activeCompanyId,
-                assigned_users: req.user._id
-            }).populate('assigned_users', 'name title email role');
-        }
+            let projects;
+            if (canViewAllCompanyProjects) {
+                projects = await Project.find({ company: activeCompanyId }).populate(
+                    'assigned_users',
+                    'name title email role'
+                );
+            } else {
+                projects = await Project.find({
+                    company: activeCompanyId,
+                    assigned_users: req.user._id
+                }).populate('assigned_users', 'name title email role');
+            }
 
-        const projectIds = projects.map(p => p._id);
+            const projectIds = projects.map((p) => p._id);
 
-        // Aggregate total and opened (open + in_progress) ticket counts per project
-        const ticketCounts = await Ticket.aggregate([
-            { $match: { company: req.companyId, project: { $in: projectIds } } },
-            {
-                $group: {
-                    _id: '$project',
-                    totalTickets: { $sum: 1 },
-                    openedTickets: {
-                        $sum: { $cond: [{ $in: ['$status', ['open', 'in_progress']] }, 1, 0] }
+            const ticketCounts = await Ticket.aggregate([
+                { $match: { company: req.companyId, project: { $in: projectIds } } },
+                {
+                    $group: {
+                        _id: '$project',
+                        totalTickets: { $sum: 1 },
+                        openedTickets: {
+                            $sum: { $cond: [{ $in: ['$status', ['open', 'in_progress']] }, 1, 0] }
+                        }
                     }
                 }
-            }
-        ]);
+            ]);
 
-        const countByProject = {};
-        ticketCounts.forEach(({ _id, totalTickets, openedTickets }) => {
-            countByProject[_id.toString()] = { totalTickets, openedTickets };
-        });
+            const countByProject = {};
+            ticketCounts.forEach(({ _id, totalTickets, openedTickets }) => {
+                countByProject[_id.toString()] = { totalTickets, openedTickets };
+            });
 
-        const projectsWithCounts = projects.map(project => {
-            const counts = countByProject[project._id.toString()] || { totalTickets: 0, openedTickets: 0 };
-            return {
-                ...enrichAssignedUsersDisplayName(project, activeCompanyId, req.activeCompanyName || null),
-                totalTickets: counts.totalTickets,
-                openedTickets: counts.openedTickets
-            };
-        });
+            projectsWithCounts = projects.map((project) => {
+                const counts = countByProject[project._id.toString()] || { totalTickets: 0, openedTickets: 0 };
+                return {
+                    ...enrichAssignedUsersDisplayName(project, activeCompanyId, req.activeCompanyName || null),
+                    totalTickets: counts.totalTickets,
+                    openedTickets: counts.openedTickets
+                };
+            });
+        }
 
         res.json({ projects: projectsWithCounts });
     } catch (error) {
@@ -282,9 +373,14 @@ router.get('/my-projects', authenticateToken, async (req, res) => {
 
 async function resolveProjectForNotes(req, projectId) {
     const activeCompanyId = req.companyId ? req.companyId.toString() : null;
-    const project = await Project.findById(projectId)
-        .populate('assigned_users', 'name title email role')
-        .lean();
+    let project;
+    if (isPostgresPrimary()) {
+        project = await projectSql.getProjectLeanForNotes(projectId);
+    } else {
+        project = await Project.findById(projectId)
+            .populate('assigned_users', 'name title email role')
+            .lean();
+    }
     if (!project) {
         return { error: { status: 404, message: 'Project not found' } };
     }
@@ -309,12 +405,14 @@ router.get('/:projectId/notes', authenticateToken, async (req, res) => {
             return res.status(gate.error.status).json({ message: gate.error.message });
         }
 
-        const notes = await ProjectPersonalNote.find({
-            project: projectId,
-            user: req.user._id
-        })
-            .sort({ updatedAt: -1 })
-            .lean();
+        const notes = isPostgresPrimary()
+            ? await projectSql.listNotes(projectId, req.user._id)
+            : await ProjectPersonalNote.find({
+                project: projectId,
+                user: req.user._id
+            })
+                .sort({ updatedAt: -1 })
+                .lean();
 
         res.json({ notes });
     } catch (error) {
@@ -336,12 +434,18 @@ router.post('/:projectId/notes', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: 'Note content is required' });
         }
 
-        const note = new ProjectPersonalNote({
-            project: projectId,
-            user: req.user._id,
-            content: content.trim()
-        });
-        await note.save();
+        let note;
+        if (isPostgresPrimary()) {
+            note = await projectSql.createNote(projectId, req.user._id, content);
+        } else {
+            const n = new ProjectPersonalNote({
+                project: projectId,
+                user: req.user._id,
+                content: content.trim()
+            });
+            await n.save();
+            note = n;
+        }
 
         res.status(201).json({ note });
     } catch (error) {
@@ -363,11 +467,16 @@ router.put('/:projectId/notes/:noteId', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: 'Note content is required' });
         }
 
-        const note = await ProjectPersonalNote.findOneAndUpdate(
-            { _id: noteId, project: projectId, user: req.user._id },
-            { content: content.trim() },
-            { new: true }
-        );
+        let note;
+        if (isPostgresPrimary()) {
+            note = await projectSql.updateNote(noteId, projectId, req.user._id, content);
+        } else {
+            note = await ProjectPersonalNote.findOneAndUpdate(
+                { _id: noteId, project: projectId, user: req.user._id },
+                { content: content.trim() },
+                { new: true }
+            );
+        }
 
         if (!note) {
             return res.status(404).json({ message: 'Note not found' });
@@ -388,13 +497,15 @@ router.delete('/:projectId/notes/:noteId', authenticateToken, async (req, res) =
             return res.status(gate.error.status).json({ message: gate.error.message });
         }
 
-        const result = await ProjectPersonalNote.deleteOne({
-            _id: noteId,
-            project: projectId,
-            user: req.user._id
-        });
+        const deleted = isPostgresPrimary()
+            ? await projectSql.deleteNote(noteId, projectId, req.user._id)
+            : (await ProjectPersonalNote.deleteOne({
+                _id: noteId,
+                project: projectId,
+                user: req.user._id
+            })).deletedCount > 0;
 
-        if (result.deletedCount === 0) {
+        if (!deleted) {
             return res.status(404).json({ message: 'Note not found' });
         }
 
@@ -411,7 +522,9 @@ router.get('/:projectId', authenticateToken, async (req, res) => {
         const { projectId } = req.params;
         const activeCompanyId = req.companyId ? req.companyId.toString() : null;
 
-        const project = await Project.findById(projectId).populate('assigned_users', 'name title email role');
+        const project = isPostgresPrimary()
+            ? await projectSql.getProjectByIdWithAssignees(projectId)
+            : await Project.findById(projectId).populate('assigned_users', 'name title email role');
         if (!project) {
             return res.status(404).json({ message: 'Project not found' });
         }
@@ -449,6 +562,22 @@ router.put('/:projectId/status', authenticateToken, async (req, res) => {
 
         if (!status) {
             return res.status(400).json({ message: 'Status is required' });
+        }
+
+        if (isPostgresPrimary()) {
+            const existing = await projectSql.getProjectByIdWithAssignees(projectId);
+            if (!existing) {
+                return res.status(404).json({ message: 'Project not found' });
+            }
+            if (!activeCompanyId || !existing.company || String(existing.company) !== activeCompanyId) {
+                return res.status(403).json({ message: 'You can only update projects in your active company' });
+            }
+            await projectSql.updateProjectStatus(projectId, status);
+            const project = await projectSql.getProjectByIdWithAssignees(projectId);
+            return res.json({
+                message: 'Project status updated successfully',
+                project
+            });
         }
 
         const project = await Project.findById(projectId);

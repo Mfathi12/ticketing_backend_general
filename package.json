@@ -8,6 +8,10 @@
     "seed": "node scripts/seed.js",
     "fix-indexes": "node scripts/fixTicketIndexes.js",
     "perf:benchmark": "node scripts/performance-benchmark.js",
+    "migrate:mongo-to-pg": "node scripts/mongoToPostgres.js",
+    "migrate:mongo-to-pg:full": "node scripts/mongoToPostgres.js --sync-alter --verify",
+    "migrate:mongo-to-pg:fresh": "node scripts/mongoToPostgres.js --truncate --sync-alter --verify",
+    "migrate:mongo-to-pg:verify": "node scripts/mongoToPostgres.js --verify-only",
     "test": "node --test"
   },
   "keywords": [],
@@ -27,6 +31,9 @@
     "multer": "^2.0.2",
     "nodemailer": "^7.0.9",
     "nodemon": "^3.1.14",
+    "pg": "^8.20.0",
+    "pg-hstore": "^2.3.4",
+    "sequelize": "^6.37.8",
     "socket.io": "^4.8.3"
   }
 }

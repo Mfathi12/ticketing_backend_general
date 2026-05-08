@@ -2,6 +2,9 @@ const express = require('express');
 const axios = require('axios');
 const { authenticateToken } = require('../middleware/auth');
 const { Company } = require('../models');
+const { isPostgresPrimary } = require('../services/sql/runtime');
+const authSql = require('../services/sql/authSql');
+const { findCompanyByPaymobOrderId } = require('../services/sql/companySql');
 const {
     serializePlans,
     getLocalizedPlans,
@@ -206,7 +209,9 @@ router.get('/me', authenticateToken, async (req, res) => {
         return res.status(400).json({ message: t(req.lang, 'common.active_company_required') });
     }
 
-    const company = await Company.findById(req.companyId).select('subscription');
+    const company = isPostgresPrimary()
+        ? await authSql.loadCompanyForSubscription(req.companyId)
+        : await Company.findById(req.companyId).select('subscription');
     if (!company) {
         return res.status(404).json({ message: t(req.lang, 'common.company_not_found') });
     }
@@ -261,7 +266,9 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
             return res.status(500).json({ message: t(req.lang, 'subscription.paymob_keys_required') });
         }
 
-        const company = await Company.findById(req.companyId).select('name email subscription');
+        const company = isPostgresPrimary()
+            ? await authSql.loadCompanyForSubscription(req.companyId)
+            : await Company.findById(req.companyId).select('name email subscription');
         if (!company) {
             return res.status(404).json({ message: t(req.lang, 'common.company_not_found') });
         }
@@ -441,12 +448,16 @@ router.post('/paymob/webhook', async (req, res) => {
         const companyId = merchantOrderId ? String(merchantOrderId) : '';
         let company = null;
         if (companyId) {
-            company = await Company.findById(companyId);
+            company = isPostgresPrimary()
+                ? await authSql.loadCompanyForSubscription(companyId)
+                : await Company.findById(companyId);
         }
         if (!company && orderId) {
-            company = await Company.findOne({
-                'subscription.paymobOrderId': String(orderId)
-            });
+            company = isPostgresPrimary()
+                ? await findCompanyByPaymobOrderId(String(orderId))
+                : await Company.findOne({
+                    'subscription.paymobOrderId': String(orderId)
+                });
         }
         if (!company) {
             return res.status(404).json({ message: t(req.lang, 'common.company_not_found') });
@@ -515,7 +526,9 @@ router.post('/paymob/confirm', authenticateToken, async (req, res) => {
             return res.status(403).json({ message: t(req.lang, 'common.insufficient_permissions') });
         }
 
-        const company = await Company.findById(req.companyId);
+        const company = isPostgresPrimary()
+            ? await authSql.loadCompanyForSubscription(req.companyId)
+            : await Company.findById(req.companyId);
         if (!company) {
             return res.status(404).json({ message: t(req.lang, 'common.company_not_found') });
         }
@@ -616,7 +629,9 @@ router.post('/paymob/cancel', authenticateToken, async (req, res) => {
             return res.status(403).json({ message: t(req.lang, 'common.insufficient_permissions') });
         }
 
-        const company = await Company.findById(req.companyId);
+        const company = isPostgresPrimary()
+            ? await authSql.loadCompanyForSubscription(req.companyId)
+            : await Company.findById(req.companyId);
         if (!company) {
             return res.status(404).json({ message: t(req.lang, 'common.company_not_found') });
         }

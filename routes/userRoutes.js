@@ -1,10 +1,15 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
+const { Op } = require('sequelize');
 const { User, Company } = require('../models');
 const { authenticateToken } = require('../middleware/auth');
 const { sendUserInviteEmail } = require('../services/emailService');
 const { canAddMembers, getCompanyPlan } = require('../services/subscriptionService');
+const { isPostgresPrimary } = require('../services/sql/runtime');
+const authSql = require('../services/sql/authSql');
+const { loadCompanyWithMembers } = require('../services/sql/companySql');
+const userCompanySql = require('../services/sql/userCompanySql');
 
 const router = express.Router();
 const membershipCompanyId = (entry) => {
@@ -20,7 +25,9 @@ const mapCompaniesWithMembership = async (memberships = []) => {
         .filter(Boolean);
 
     const companies = companyIds.length
-        ? await Company.find({ _id: { $in: companyIds } }).select('name email ownerUser')
+        ? isPostgresPrimary()
+            ? await authSql.findCompaniesByIds(companyIds)
+            : await Company.find({ _id: { $in: companyIds } }).select('name email ownerUser')
         : [];
 
     return memberships.map((entry) => {
@@ -84,22 +91,6 @@ router.post('/add-account', authenticateToken, async (req, res) => {
         }
 
         const normalizedEmail = email.toLowerCase().trim();
-        const company = await Company.findById(companyId);
-        if (!company) {
-            return res.status(404).json({ message: 'Company not found' });
-        }
-
-        const currentMembersCount = Array.isArray(company.members) ? company.members.length : 0;
-        if (!canAddMembers(company, currentMembersCount, 1)) {
-            const activePlan = getCompanyPlan(company);
-            return res.status(403).json({
-                message: `Current ${activePlan.name} plan allows up to ${activePlan.limits.maxMembers} accounts.`,
-                limit: activePlan.limits.maxMembers,
-                planId: activePlan.id
-            });
-        }
-
-        let targetUser = await User.findOne({ email: normalizedEmail });
         const companyRole = role || 'user';
         if (!COMPANY_ROLES.includes(companyRole)) {
             return res.status(400).json({ message: `Invalid role. Allowed roles: ${COMPANY_ROLES.join(', ')}` });
@@ -109,66 +100,125 @@ router.post('/add-account', authenticateToken, async (req, res) => {
         const inviteExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24h
         const inviterName = req.user?.name || 'Team admin';
 
-        if (!targetUser) {
-            targetUser = await User.create({
-                name,
-                title,
-                email: normalizedEmail,
-                role: companyRole,
-                emailVerified: true,
-                registrationEmailPending: false,
-                companies: [{
+        let targetUser;
+        let company;
+
+        if (isPostgresPrimary()) {
+            company = await loadCompanyWithMembers(companyId);
+            if (!company) {
+                return res.status(404).json({ message: 'Company not found' });
+            }
+            const currentMembersCount = Array.isArray(company.members) ? company.members.length : 0;
+            if (!canAddMembers(company, currentMembersCount, 1)) {
+                const activePlan = getCompanyPlan(company);
+                return res.status(403).json({
+                    message: `Current ${activePlan.name} plan allows up to ${activePlan.limits.maxMembers} accounts.`,
+                    limit: activePlan.limits.maxMembers,
+                    planId: activePlan.id
+                });
+            }
+            try {
+                const result = await userCompanySql.addAccountSql({
+                    companyId,
+                    inviterUserId: req.user._id,
+                    name,
+                    title,
+                    email: normalizedEmail,
+                    companyRole,
+                    inviteToken,
+                    inviteTokenHash,
+                    inviteExpiresAt,
+                    inviterName
+                });
+                targetUser = result.targetUser;
+                company = result.company;
+                req._pgAddAccountShouldSendInvite = result.shouldSendInvite;
+            } catch (e) {
+                if (e.code === 'already_member') {
+                    return res.status(400).json({ message: 'User is already a member of this company' });
+                }
+                throw e;
+            }
+        } else {
+            company = await Company.findById(companyId);
+            if (!company) {
+                return res.status(404).json({ message: 'Company not found' });
+            }
+
+            const currentMembersCount = Array.isArray(company.members) ? company.members.length : 0;
+            if (!canAddMembers(company, currentMembersCount, 1)) {
+                const activePlan = getCompanyPlan(company);
+                return res.status(403).json({
+                    message: `Current ${activePlan.name} plan allows up to ${activePlan.limits.maxMembers} accounts.`,
+                    limit: activePlan.limits.maxMembers,
+                    planId: activePlan.id
+                });
+            }
+
+            targetUser = await User.findOne({ email: normalizedEmail });
+            if (!targetUser) {
+                targetUser = await User.create({
+                    name,
+                    title,
+                    email: normalizedEmail,
+                    role: companyRole,
+                    emailVerified: true,
+                    registrationEmailPending: false,
+                    companies: [{
+                        company: companyId,
+                        displayName: String(name).trim(),
+                        companyRole,
+                        isOwner: false
+                    }],
+                    invite: {
+                        tokenHash: inviteTokenHash,
+                        expiresAt: inviteExpiresAt,
+                        invitedBy: req.user._id,
+                        company: companyId
+                    }
+                });
+            } else {
+                const alreadyInCompany = (targetUser.companies || []).some(
+                    (entry) => membershipCompanyId(entry) === companyId
+                );
+                if (alreadyInCompany) {
+                    return res.status(400).json({ message: 'User is already a member of this company' });
+                }
+
+                targetUser.companies.push({
                     company: companyId,
                     displayName: String(name).trim(),
                     companyRole,
                     isOwner: false
-                }],
-                invite: {
-                    tokenHash: inviteTokenHash,
-                    expiresAt: inviteExpiresAt,
-                    invitedBy: req.user._id,
-                    company: companyId
+                });
+                if (!targetUser.password) {
+                    targetUser.invite = {
+                        tokenHash: inviteTokenHash,
+                        expiresAt: inviteExpiresAt,
+                        invitedBy: req.user._id,
+                        company: companyId,
+                        acceptedAt: null
+                    };
                 }
-            });
-        } else {
-            const alreadyInCompany = (targetUser.companies || []).some(
-                (entry) => membershipCompanyId(entry) === companyId
+                await targetUser.save();
+            }
+
+            const userExistsInCompany = (company.members || []).some(
+                (member) => member.user.toString() === targetUser._id.toString()
             );
-            if (alreadyInCompany) {
-                return res.status(400).json({ message: 'User is already a member of this company' });
+            if (!userExistsInCompany) {
+                company.members.push({
+                    user: targetUser._id,
+                    role: companyRole,
+                    isOwner: false
+                });
+                await company.save();
             }
-
-            targetUser.companies.push({
-                company: companyId,
-                displayName: String(name).trim(),
-                companyRole,
-                isOwner: false
-            });
-            if (!targetUser.password) {
-                targetUser.invite = {
-                    tokenHash: inviteTokenHash,
-                    expiresAt: inviteExpiresAt,
-                    invitedBy: req.user._id,
-                    company: companyId,
-                    acceptedAt: null
-                };
-            }
-            await targetUser.save();
         }
 
-        const userExistsInCompany = (company.members || []).some(
-            (member) => member.user.toString() === targetUser._id.toString()
-        );
-        if (!userExistsInCompany) {
-            company.members.push({
-                user: targetUser._id,
-                role: companyRole,
-                isOwner: false
-            });
-            await company.save();
-        }
-
-        const shouldSendInvite = !targetUser.password || (targetUser.invite && targetUser.invite.tokenHash === inviteTokenHash);
+        const shouldSendInvite = isPostgresPrimary()
+            ? Boolean(req._pgAddAccountShouldSendInvite)
+            : !targetUser.password || (targetUser.invite && targetUser.invite.tokenHash === inviteTokenHash);
         let inviteLink = null;
         if (shouldSendInvite) {
             const frontendBaseUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
@@ -222,13 +272,36 @@ router.delete('/delete-account/:userId', authenticateToken, async (req, res) => 
         }
 
         const companyId = req.companyId.toString();
-        const company = await Company.findById(companyId);
-        if (!company) {
-            return res.status(404).json({ message: 'Company not found' });
-        }
 
         if (req.user._id.toString() === userId) {
             return res.status(400).json({ message: 'Cannot remove your own account from this company' });
+        }
+
+        if (isPostgresPrimary()) {
+            const company = await loadCompanyWithMembers(companyId);
+            if (!company) {
+                return res.status(404).json({ message: 'Company not found' });
+            }
+            const user = await authSql.findUserById(userId);
+            if (!user) {
+                return res.status(404).json({ message: 'User not found' });
+            }
+            const userMembership = (user.companies || []).find(
+                (entry) => membershipCompanyId(entry) === companyId
+            );
+            if (!userMembership) {
+                return res.status(400).json({ message: 'User is not a member of the active company' });
+            }
+            if (userMembership.isOwner || userMembership.companyRole === 'owner') {
+                return res.status(400).json({ message: 'Company owner cannot be removed' });
+            }
+            await userCompanySql.deleteAccountSql({ companyId, userId });
+            return res.json({ message: 'User removed from company successfully' });
+        }
+
+        const company = await Company.findById(companyId);
+        if (!company) {
+            return res.status(404).json({ message: 'Company not found' });
         }
 
         const user = await User.findById(userId);
@@ -277,7 +350,9 @@ router.put('/update-user/:userId', authenticateToken, async (req, res) => {
             return res.status(403).json({ message: 'You can only update your own account' });
         }
 
-        const user = await User.findById(userId);
+        const user = isPostgresPrimary()
+            ? await authSql.findUserById(userId)
+            : await User.findById(userId).lean();
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
@@ -307,12 +382,25 @@ router.put('/update-user/:userId', authenticateToken, async (req, res) => {
         if (name) updateData.name = name;
         if (title) updateData.title = title;
         if (email) {
-            // Check if email is already taken by another user
-            const existingUser = await User.findOne({ email: email.toLowerCase(), _id: { $ne: userId } });
-            if (existingUser) {
-                return res.status(400).json({ message: 'Email already in use by another account' });
+            const normalized = email.toLowerCase();
+            if (isPostgresPrimary()) {
+                const m = require('../db/postgres').getSequelizeModels();
+                const existingUser = await m.User.findOne({
+                    where: {
+                        email: normalized,
+                        id: { [Op.ne]: String(userId) }
+                    }
+                });
+                if (existingUser) {
+                    return res.status(400).json({ message: 'Email already in use by another account' });
+                }
+            } else {
+                const existingUser = await User.findOne({ email: normalized, _id: { $ne: userId } });
+                if (existingUser) {
+                    return res.status(400).json({ message: 'Email already in use by another account' });
+                }
             }
-            updateData.email = email.toLowerCase();
+            updateData.email = normalized;
         }
 
         // Role update is company-scoped (membership role in active company)
@@ -329,17 +417,43 @@ router.put('/update-user/:userId', authenticateToken, async (req, res) => {
             if (membershipIndex === -1) {
                 return res.status(400).json({ message: 'User is not a member of active company' });
             }
-            user.companies[membershipIndex].companyRole = role;
+            if (!isPostgresPrimary()) {
+                user.companies[membershipIndex].companyRole = role;
+            }
         }
 
-        if (Object.keys(updateData).length) {
-            Object.assign(user, updateData);
+        if (isPostgresPrimary()) {
+            await userCompanySql.updateUserSql({
+                userId,
+                activeCompanyId,
+                updateData,
+                role: role || null,
+                canManageCompanyUser
+            });
+            const updatedUser = await authSql.findUserById(userId);
+            return res.json({
+                message: 'User updated successfully',
+                user: updatedUser
+            });
         }
-        await user.save();
+
+        const userDoc = await User.findById(userId);
+        if (Object.keys(updateData).length) {
+            Object.assign(userDoc, updateData);
+        }
+        if (role && activeCompanyId) {
+            const membershipIndex = (userDoc.companies || []).findIndex(
+                (entry) => membershipCompanyId(entry) === activeCompanyId
+            );
+            if (membershipIndex !== -1) {
+                userDoc.companies[membershipIndex].companyRole = role;
+            }
+        }
+        await userDoc.save();
 
         if (role && activeCompanyId) {
             await Company.updateOne(
-                { _id: activeCompanyId, 'members.user': user._id },
+                { _id: activeCompanyId, 'members.user': userDoc._id },
                 { $set: { 'members.$.role': role } }
             );
         }
@@ -365,16 +479,19 @@ router.put('/change-password', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: 'Current password and new password are required' });
         }
 
-        const user = await User.findById(req.user._id);
+        const user = isPostgresPrimary()
+            ? await authSql.findUserById(req.user._id, { withPassword: true })
+            : await User.findById(req.user._id);
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
 
-        const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
+        const pw = user.password;
+        const isCurrentPasswordValid = await bcrypt.compare(currentPassword, pw);
         if (!isCurrentPasswordValid) {
             return res.status(400).json({ message: 'Current password is incorrect' });
         }
-        const isSameAsCurrent = await bcrypt.compare(newPassword, user.password);
+        const isSameAsCurrent = await bcrypt.compare(newPassword, pw);
         if (isSameAsCurrent) {
             return res.status(400).json({
                 message: 'New password must be different from current password'
@@ -382,7 +499,12 @@ router.put('/change-password', authenticateToken, async (req, res) => {
         }
 
         const hashedNewPassword = await bcrypt.hash(newPassword, 12);
-        await User.findByIdAndUpdate(req.user._id, { password: hashedNewPassword });
+        if (isPostgresPrimary()) {
+            const m = require('../db/postgres').getSequelizeModels();
+            await m.User.update({ password: hashedNewPassword }, { where: { id: String(req.user._id) } });
+        } else {
+            await User.findByIdAndUpdate(req.user._id, { password: hashedNewPassword });
+        }
 
         res.json({ message: 'Password changed successfully' });
     } catch (error) {
@@ -402,11 +524,16 @@ router.post('/register-fcm-token', authenticateToken, async (req, res) => {
 
         const normalizedToken = token.trim();
 
-        const user = await User.findByIdAndUpdate(
-            req.user._id,
-            { $addToSet: { fcmTokens: normalizedToken } }, // addToSet to avoid duplicates
-            { new: true }
-        ).select('-password');
+        let user;
+        if (isPostgresPrimary()) {
+            user = await userCompanySql.registerFcmTokenSql(req.user._id, normalizedToken);
+        } else {
+            user = await User.findByIdAndUpdate(
+                req.user._id,
+                { $addToSet: { fcmTokens: normalizedToken } },
+                { new: true }
+            ).select('-password');
+        }
 
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
@@ -433,11 +560,16 @@ router.post('/unregister-fcm-token', authenticateToken, async (req, res) => {
 
         const normalizedToken = token.trim();
 
-        const user = await User.findByIdAndUpdate(
-            req.user._id,
-            { $pull: { fcmTokens: normalizedToken } },
-            { new: true }
-        ).select('-password');
+        let user;
+        if (isPostgresPrimary()) {
+            user = await userCompanySql.unregisterFcmTokenSql(req.user._id, normalizedToken);
+        } else {
+            user = await User.findByIdAndUpdate(
+                req.user._id,
+                { $pull: { fcmTokens: normalizedToken } },
+                { new: true }
+            ).select('-password');
+        }
 
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
@@ -465,6 +597,17 @@ router.post('/accept-invite', async (req, res) => {
         }
 
         const tokenHash = hashInviteToken(token);
+        if (isPostgresPrimary()) {
+            const r = await userCompanySql.acceptInviteSql(token, password, hashInviteToken);
+            if (r.error === 'invalid') {
+                return res.status(400).json({ message: 'Invalid invitation token' });
+            }
+            if (r.error === 'expired') {
+                return res.status(400).json({ message: 'Invitation token expired' });
+            }
+            return res.json({ message: 'Invitation accepted successfully. You can now login.' });
+        }
+
         const user = await User.findOne({
             'invite.tokenHash': tokenHash
         });
@@ -513,27 +656,40 @@ router.get('/all-users', authenticateToken, async (req, res) => {
             return res.status(403).json({ message: 'Insufficient permissions to list users for this company' });
         }
 
-        const company = await Company.findById(req.companyId).populate({
-            path: 'members.user',
-            select: '-password'
-        });
+        let users;
+        if (isPostgresPrimary()) {
+            const company = await loadCompanyWithMembers(req.companyId);
+            if (!company) {
+                return res.status(404).json({ message: 'Company not found' });
+            }
+            const raw = await userCompanySql.listCompanyUsersSql(req.companyId);
+            users = raw.map((u) => ({
+                ...u,
+                name: resolveMembershipDisplayName(u, req.companyId, company.name)
+            }));
+        } else {
+            const company = await Company.findById(req.companyId).populate({
+                path: 'members.user',
+                select: '-password'
+            });
 
-        if (!company) {
-            return res.status(404).json({ message: 'Company not found' });
+            if (!company) {
+                return res.status(404).json({ message: 'Company not found' });
+            }
+
+            users = (company.members || [])
+                .map((mem) => {
+                    if (!mem.user) return null;
+                    const u = mem.user.toObject ? mem.user.toObject() : { ...mem.user };
+                    return {
+                        ...u,
+                        name: resolveMembershipDisplayName(mem.user, req.companyId, company.name),
+                        companyMemberRole: mem.role,
+                        companyIsOwner: mem.isOwner
+                    };
+                })
+                .filter(Boolean);
         }
-
-        const users = (company.members || [])
-            .map((mem) => {
-                if (!mem.user) return null;
-                const u = mem.user.toObject ? mem.user.toObject() : { ...mem.user };
-                return {
-                    ...u,
-                    name: resolveMembershipDisplayName(mem.user, req.companyId, company.name),
-                    companyMemberRole: mem.role,
-                    companyIsOwner: mem.isOwner
-                };
-            })
-            .filter(Boolean);
 
         res.json({
             companyId: req.companyId,
@@ -548,7 +704,9 @@ router.get('/all-users', authenticateToken, async (req, res) => {
 // Get user profile
 router.get('/profile', authenticateToken, async (req, res) => {
     try {
-        const user = await User.findById(req.user._id).select('-password');
+        const user = isPostgresPrimary()
+            ? await authSql.findUserById(req.user._id)
+            : await User.findById(req.user._id).select('-password').lean();
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
@@ -568,12 +726,13 @@ router.get('/profile', authenticateToken, async (req, res) => {
                 ? activeMembership.company.name
                 : user.name);
 
+        const uid = user._id || user.id;
         res.json({
             activeCompanyId: activeCompanyId || null,
             companyName: activeMembership?.company?.name || null,
             userName: resolvedName,
             user: {
-                id: user._id,
+                id: uid,
                 name: resolvedName,
                 title: user.title,
                 email: user.email,
@@ -592,7 +751,9 @@ router.put('/update-profile', authenticateToken, async (req, res) => {
     try {
         const { name, title, email } = req.body;
 
-        const user = await User.findById(req.user._id);
+        const user = isPostgresPrimary()
+            ? await authSql.findUserById(req.user._id)
+            : await User.findById(req.user._id);
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
@@ -602,22 +763,41 @@ router.put('/update-profile', authenticateToken, async (req, res) => {
         if (name) updateData.name = name;
         if (title) updateData.title = title;
         if (email) {
-            // Check if email is already taken by another user
-            const existingUser = await User.findOne({ 
-                email: email.toLowerCase(), 
-                _id: { $ne: req.user._id } 
-            });
-            if (existingUser) {
-                return res.status(400).json({ message: 'Email already in use by another account' });
+            const normalized = email.toLowerCase();
+            if (isPostgresPrimary()) {
+                const m = require('../db/postgres').getSequelizeModels();
+                const existingUser = await m.User.findOne({
+                    where: { email: normalized, id: { [Op.ne]: String(req.user._id) } }
+                });
+                if (existingUser) {
+                    return res.status(400).json({ message: 'Email already in use by another account' });
+                }
+            } else {
+                const existingUser = await User.findOne({
+                    email: normalized,
+                    _id: { $ne: req.user._id }
+                });
+                if (existingUser) {
+                    return res.status(400).json({ message: 'Email already in use by another account' });
+                }
             }
-            updateData.email = email.toLowerCase();
+            updateData.email = normalized;
         }
 
-        const updatedUser = await User.findByIdAndUpdate(
-            req.user._id,
-            updateData,
-            { new: true }
-        ).select('-password');
+        let updatedUser;
+        if (isPostgresPrimary()) {
+            if (Object.keys(updateData).length) {
+                const m = require('../db/postgres').getSequelizeModels();
+                await m.User.update(updateData, { where: { id: String(req.user._id) } });
+            }
+            updatedUser = await authSql.findUserById(req.user._id);
+        } else {
+            updatedUser = await User.findByIdAndUpdate(
+                req.user._id,
+                updateData,
+                { new: true }
+            ).select('-password');
+        }
 
         res.json({
             message: 'Profile updated successfully',

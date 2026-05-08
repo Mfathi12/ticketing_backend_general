@@ -1,6 +1,16 @@
+const mongoose = require('mongoose');
+const { Op } = require('sequelize');
 const { SubscriptionPlanContent, PlanCatalogOverride } = require('../models');
+const { getSequelizeModels, isPostgresEnabled } = require('../db/postgres');
 const { localizePlan, normalizeLang } = require('../utils/i18n');
 const hasArabicChars = (value) => /[\u0600-\u06FF]/.test(String(value || ''));
+
+/** Plan translation + catalog override rows live in Postgres when enabled and models are ready. */
+const useSqlPlanTables = () => {
+    if (!isPostgresEnabled()) return false;
+    const m = getSequelizeModels();
+    return Boolean(m?.SubscriptionPlanContent && m?.PlanCatalogOverride);
+};
 
 const PLAN_IDS = ['free', 'basic', 'pro', 'enterprise'];
 
@@ -143,7 +153,16 @@ const getPlansSourceList = () =>
 
 const refreshPlanCatalogCache = async () => {
     try {
-        const overrides = await PlanCatalogOverride.find({}).lean();
+        let overrides;
+        if (useSqlPlanTables()) {
+            const rows = await getSequelizeModels().PlanCatalogOverride.findAll({ raw: true });
+            overrides = rows.map((row) => ({
+                ...row,
+                features: Array.isArray(row.features) ? row.features : row.features || undefined
+            }));
+        } else {
+            overrides = await PlanCatalogOverride.find({}).lean();
+        }
         const byId = new Map(overrides.map((row) => [row.planId, row]));
         effectivePlansCache = SUBSCRIPTION_PLANS.map((base) =>
             mergePlanWithOverride(base, byId.get(base.id))
@@ -184,8 +203,90 @@ const serializePlans = () =>
     }));
 
 let plansSeedPromise = null;
+
+const ensurePlanTranslationsSeededSql = async () => {
+    const m = getSequelizeModels();
+    const basePlans = serializePlans();
+    const planIds = basePlans.map((p) => p.id);
+    const existingRows = await m.SubscriptionPlanContent.findAll({ where: { planId: { [Op.in]: planIds } } });
+    const existingIds = new Set(existingRows.map((r) => r.planId));
+
+    const inserts = basePlans
+        .filter((plan) => !existingIds.has(plan.id))
+        .map((plan) => ({
+            id: new mongoose.Types.ObjectId().toString(),
+            planId: plan.id,
+            translations: {
+                en: {
+                    name: localizePlan(plan, 'en').name,
+                    description: localizePlan(plan, 'en').description,
+                    billingPeriod: localizePlan(plan, 'en').billingPeriod,
+                    features: localizePlan(plan, 'en').features
+                },
+                ar: {
+                    name: localizePlan(plan, 'ar').name,
+                    description: localizePlan(plan, 'ar').description,
+                    billingPeriod: localizePlan(plan, 'ar').billingPeriod,
+                    features: localizePlan(plan, 'ar').features
+                }
+            }
+        }));
+
+    if (inserts.length) {
+        await m.SubscriptionPlanContent.bulkCreate(inserts, { ignoreDuplicates: true });
+    }
+
+    const allRows = await m.SubscriptionPlanContent.findAll({ where: { planId: { [Op.in]: planIds } } });
+    for (const plan of basePlans) {
+        const row = allRows.find((r) => r.planId === plan.id);
+        if (!row) continue;
+        const doc = row.get({ plain: true });
+        const defaultEn = localizePlan(plan, 'en');
+        const defaultAr = localizePlan(plan, 'ar');
+        const en = doc.translations?.en || {};
+        const ar = doc.translations?.ar || {};
+        const arLooksEnglish =
+            (ar.name && ar.name === en.name) ||
+            (ar.description && ar.description === en.description) ||
+            (ar.billingPeriod && ar.billingPeriod === en.billingPeriod);
+        const arMissing =
+            !ar.name ||
+            !ar.description ||
+            !ar.billingPeriod ||
+            !Array.isArray(ar.features) ||
+            ar.features.length === 0;
+
+        if (arMissing || arLooksEnglish) {
+            await row.update({
+                translations: {
+                    en: {
+                        name: en.name || defaultEn.name,
+                        description: en.description || defaultEn.description,
+                        billingPeriod: en.billingPeriod || defaultEn.billingPeriod,
+                        features:
+                            Array.isArray(en.features) && en.features.length ? en.features : defaultEn.features
+                    },
+                    ar: {
+                        name: defaultAr.name,
+                        description: defaultAr.description,
+                        billingPeriod: defaultAr.billingPeriod,
+                        features: defaultAr.features
+                    }
+                }
+            });
+        }
+    }
+};
+
 const ensurePlanTranslationsSeeded = async () => {
     if (plansSeedPromise) return plansSeedPromise;
+    if (useSqlPlanTables()) {
+        plansSeedPromise = ensurePlanTranslationsSeededSql().catch((error) => {
+            plansSeedPromise = null;
+            throw error;
+        });
+        return plansSeedPromise;
+    }
     plansSeedPromise = (async () => {
         const basePlans = serializePlans();
         const existingDocs = await SubscriptionPlanContent.find({
@@ -273,9 +374,17 @@ const getLocalizedPlans = async (lang = 'en') => {
     const basePlans = serializePlans();
     try {
         await ensurePlanTranslationsSeeded();
-        const dbPlans = await SubscriptionPlanContent.find({
-            planId: { $in: basePlans.map((p) => p.id) }
-        }).lean();
+        let dbPlans;
+        if (useSqlPlanTables()) {
+            dbPlans = await getSequelizeModels().SubscriptionPlanContent.findAll({
+                where: { planId: { [Op.in]: basePlans.map((p) => p.id) } },
+                raw: true
+            });
+        } else {
+            dbPlans = await SubscriptionPlanContent.find({
+                planId: { $in: basePlans.map((p) => p.id) }
+            }).lean();
+        }
         const byId = new Map(dbPlans.map((doc) => [doc.planId, doc]));
 
         return basePlans.map((plan) => {

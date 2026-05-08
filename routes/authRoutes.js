@@ -7,6 +7,9 @@ const { User, Company } = require('../models');
 const { sendOTPEmail, sendRegistrationOTPEmail } = require('../services/emailService');
 const { authenticateToken, signAccessToken, JWT_SECRET } = require('../middleware/auth');
 const { getCompanyPlan, evaluateAndSyncCompanySubscription } = require('../services/subscriptionService');
+const { isPostgresPrimary } = require('../services/sql/runtime');
+const { waitForPostgres } = require('../db/postgres');
+const authSql = require('../services/sql/authSql');
 require('dotenv').config();
 
 const router = express.Router();
@@ -37,14 +40,22 @@ const storeRegistrationOtp = (email, otp) => {
  */
 const writeLoginSuccessResponse = async (res, user, { bodyCompanyId, fcmToken }) => {
     try {
-        await User.updateOne({ _id: user._id }, { $set: { lastLoginAt: new Date() } });
+        if (isPostgresPrimary()) {
+            await authSql.updateLastLogin(user._id);
+        } else {
+            await User.updateOne({ _id: user._id }, { $set: { lastLoginAt: new Date() } });
+        }
     } catch (e) {
         console.error('Error updating lastLoginAt:', e);
     }
 
     if (fcmToken && typeof fcmToken === 'string' && fcmToken.trim()) {
         try {
-            await User.findByIdAndUpdate(user._id, { $addToSet: { fcmTokens: fcmToken.trim() } });
+            if (isPostgresPrimary()) {
+                await authSql.addFcmToken(user._id, fcmToken.trim());
+            } else {
+                await User.findByIdAndUpdate(user._id, { $addToSet: { fcmTokens: fcmToken.trim() } });
+            }
         } catch (tokenError) {
             console.error('Error saving FCM token on login:', tokenError);
         }
@@ -54,7 +65,9 @@ const writeLoginSuccessResponse = async (res, user, { bodyCompanyId, fcmToken })
         .map((entry) => normalizeCompanyId(entry))
         .filter((id) => id && mongoose.Types.ObjectId.isValid(id));
     const companies = companyIds.length
-        ? await Company.find({ _id: { $in: companyIds } }).select('name email ownerUser')
+        ? isPostgresPrimary()
+            ? await authSql.findCompaniesByIds(companyIds)
+            : await Company.find({ _id: { $in: companyIds } }).select('name email ownerUser')
         : [];
 
     const companiesWithMembership = mapCompaniesWithMembership(user.companies || [], companies);
@@ -89,7 +102,9 @@ const writeLoginSuccessResponse = async (res, user, { bodyCompanyId, fcmToken })
 
     const token = signAccessToken(payload);
     const activeCompany = activeCompanyId
-        ? await Company.findById(activeCompanyId).select('name subscription')
+        ? isPostgresPrimary()
+            ? await authSql.loadCompanyForSubscription(activeCompanyId)
+            : await Company.findById(activeCompanyId).select('name subscription')
         : null;
     const activeMembership = activeCompanyId
         ? memberships.find((entry) => normalizeCompanyId(entry) === activeCompanyId)
@@ -181,6 +196,18 @@ const waitForDbReady = async (timeoutMs = 4000) => {
 };
 
 const ensureDbConnected = async (res) => {
+    if (isPostgresPrimary()) {
+        try {
+            await waitForPostgres(20000);
+            return true;
+        } catch (e) {
+            console.error('PostgreSQL unavailable:', e.message);
+            res.status(503).json({
+                message: 'Database is temporarily unavailable. Please try again in a moment.'
+            });
+            return false;
+        }
+    }
     const ok = await waitForDbReady(15000);
     if (!ok) {
         res.status(503).json({
@@ -244,6 +271,149 @@ router.post('/register-company', async (req, res) => {
         }
 
         const normalizedEmail = email.toLowerCase().trim();
+
+        if (isPostgresPrimary()) {
+            let ownerUserSql = await authSql.findUserByEmail(normalizedEmail, { withPassword: true });
+            if (ownerUserSql) {
+                if (!ownerUserSql.password || typeof ownerUserSql.password !== 'string') {
+                    return res.status(400).json({
+                        message: 'Existing account has no password. Please reset password first, then create company.'
+                    });
+                }
+                const isPasswordValid = await bcrypt.compare(password, ownerUserSql.password);
+                if (!isPasswordValid) {
+                    return res.status(401).json({
+                        message:
+                            'Invalid credentials for existing user. Use your current account password to add another company.'
+                    });
+                }
+                if (ownerUserSql.registrationEmailPending === true) {
+                    return res.status(403).json({
+                        message:
+                            'This email has a registration pending email verification. Enter the code from your inbox, or use POST /api/auth/resend-registration-otp.',
+                        requiresEmailVerification: true
+                    });
+                }
+            }
+
+            let ownerUser;
+            let company;
+            try {
+                const result = await authSql.registerCompany({
+                    trimmedCompanyName,
+                    trimmedOwnerName,
+                    normalizedEmail,
+                    password,
+                    existingOwnerUser: ownerUserSql || undefined
+                });
+                ownerUser = result.ownerUser;
+                company = result.company;
+            } catch (e) {
+                if (e.code === 'DUPLICATE_COMPANY_NAME') {
+                    return res.status(409).json({
+                        message: 'You already have a company with this name. Please choose a different company name.'
+                    });
+                }
+                throw e;
+            }
+
+            const companyRows = [
+                {
+                    _id: company._id,
+                    name: company.name,
+                    email: company.email,
+                    ownerUser: company.ownerUser,
+                    toString() {
+                        return String(company._id);
+                    }
+                }
+            ];
+            const companiesWithMembership = mapCompaniesWithMembership(ownerUser.companies || [], companyRows);
+
+            if (ownerUser.registrationEmailPending === true) {
+                const otp = generateOTP();
+                storeRegistrationOtp(normalizedEmail, otp);
+                try {
+                    await sendRegistrationOTPEmail(normalizedEmail, otp, trimmedCompanyName);
+                } catch (mailErr) {
+                    console.error('Registration OTP email failed:', mailErr);
+                    return res.status(502).json({
+                        message:
+                            'Company was created but we could not send the verification email. Try POST /api/auth/resend-registration-otp shortly.'
+                    });
+                }
+
+                return res.status(201).json({
+                    message:
+                        'Company created. Enter the verification code sent to your email to activate your account.',
+                    requiresEmailVerification: true,
+                    activeCompanyId: company._id,
+                    companyName: company.name,
+                    userName: ownerUser.name,
+                    company: {
+                        id: company._id,
+                        name: company.name,
+                        email: company.email,
+                        ownerUser: company.ownerUser
+                    },
+                    user: {
+                        id: ownerUser._id,
+                        name: ownerUser.name,
+                        title: ownerUser.title,
+                        email: ownerUser.email,
+                        role: ownerUser.role,
+                        companies: companiesWithMembership
+                    },
+                    subscription: {
+                        planId: 'free',
+                        status: 'active',
+                        isTrial: false,
+                        expiresAt: null,
+                        graceEndsAt: null,
+                        trialEndsAt: null
+                    },
+                    activePlan: getCompanyPlan(company)
+                });
+            }
+
+            const token = signAccessToken({
+                userId: ownerUser._id,
+                email: ownerUser.email,
+                role: ownerUser.role,
+                companyId: company._id.toString()
+            });
+
+            return res.status(201).json({
+                message: 'Company registered successfully',
+                token,
+                activeCompanyId: company._id,
+                companyName: company.name,
+                userName: ownerUser.name,
+                company: {
+                    id: company._id,
+                    name: company.name,
+                    email: company.email,
+                    ownerUser: company.ownerUser
+                },
+                user: {
+                    id: ownerUser._id,
+                    name: ownerUser.name,
+                    title: ownerUser.title,
+                    email: ownerUser.email,
+                    role: ownerUser.role,
+                    companies: companiesWithMembership
+                },
+                subscription: {
+                    planId: 'free',
+                    status: 'active',
+                    isTrial: false,
+                    expiresAt: null,
+                    graceEndsAt: null,
+                    trialEndsAt: null
+                },
+                activePlan: getCompanyPlan(company)
+            });
+        }
 
         let ownerUser = await User.findOne({ email: normalizedEmail });
 
@@ -485,7 +655,9 @@ router.post('/verify-registration-otp', async (req, res) => {
             return res.status(400).json({ message: 'Invalid code' });
         }
 
-        const user = await User.findOne({ email: normalizedEmail });
+        const user = isPostgresPrimary()
+            ? await authSql.findUserByEmail(normalizedEmail)
+            : await User.findOne({ email: normalizedEmail });
         if (!user) {
             otpStore.delete(regKey);
             return res.status(404).json({ message: 'User not found' });
@@ -495,12 +667,18 @@ router.post('/verify-registration-otp', async (req, res) => {
             return res.status(400).json({ message: 'This account is already verified. Log in with your password.' });
         }
 
-        user.emailVerified = true;
-        user.registrationEmailPending = false;
-        await user.save();
+        let verifiedUser = user;
+        if (isPostgresPrimary()) {
+            verifiedUser = await authSql.verifyRegistration(user._id);
+        } else {
+            user.emailVerified = true;
+            user.registrationEmailPending = false;
+            await user.save();
+            verifiedUser = user;
+        }
         otpStore.delete(regKey);
 
-        return writeLoginSuccessResponse(res, user, { bodyCompanyId, fcmToken });
+        return writeLoginSuccessResponse(res, verifiedUser, { bodyCompanyId, fcmToken });
     } catch (error) {
         console.error('Verify registration OTP error:', error);
         res.status(500).json({ message: 'Internal server error' });
@@ -517,7 +695,9 @@ router.post('/resend-registration-otp', async (req, res) => {
         }
 
         const normalizedEmail = String(email).toLowerCase().trim();
-        const user = await User.findOne({ email: normalizedEmail });
+        const user = isPostgresPrimary()
+            ? await authSql.findUserByEmail(normalizedEmail, { withPassword: true })
+            : await User.findOne({ email: normalizedEmail });
         if (!user || !user.password) {
             return res.status(401).json({ message: 'Invalid credentials' });
         }
@@ -581,23 +761,32 @@ router.post('/platform-admin/create', async (req, res) => {
         }
 
         const normalizedEmail = String(email).toLowerCase().trim();
-        const existing = await User.findOne({ email: normalizedEmail });
+        const existing = isPostgresPrimary()
+            ? await authSql.findUserByEmail(normalizedEmail)
+            : await User.findOne({ email: normalizedEmail });
         if (existing) {
             return res.status(409).json({ message: 'An account with this email already exists' });
         }
 
         const hashed = await bcrypt.hash(String(password), 10);
-        const user = await User.create({
-            name: String(name || 'Platform Admin').trim() || 'Platform Admin',
-            title: String(title || 'admin').trim() || 'admin',
-            email: normalizedEmail,
-            password: hashed,
-            role: 'super_admin',
-            emailVerified: true,
-            registrationEmailPending: false,
-            accountStatus: 'active',
-            companies: []
-        });
+        const user = isPostgresPrimary()
+            ? await authSql.createPlatformAdmin({
+                name: String(name || 'Platform Admin').trim() || 'Platform Admin',
+                title: String(title || 'admin').trim() || 'admin',
+                email: normalizedEmail,
+                passwordHash: hashed
+            })
+            : await User.create({
+                name: String(name || 'Platform Admin').trim() || 'Platform Admin',
+                title: String(title || 'admin').trim() || 'admin',
+                email: normalizedEmail,
+                password: hashed,
+                role: 'super_admin',
+                emailVerified: true,
+                registrationEmailPending: false,
+                accountStatus: 'active',
+                companies: []
+            });
 
         return res.status(201).json({
             message:
@@ -626,7 +815,9 @@ router.post('/login', async (req, res) => {
         }
 
         const normalizedEmail = String(email).toLowerCase().trim();
-        const user = await User.findOne({ email: normalizedEmail });
+        const user = isPostgresPrimary()
+            ? await authSql.findUserByEmail(normalizedEmail, { withPassword: true })
+            : await User.findOne({ email: normalizedEmail });
         if (!user) {
             return res.status(401).json({ message: 'Invalid credentials' });
         }
@@ -699,7 +890,9 @@ router.post('/refresh', async (req, res) => {
             }
         }
 
-        const user = await User.findById(decoded.userId).select('-password');
+        const user = isPostgresPrimary()
+            ? await authSql.findUserById(decoded.userId)
+            : await User.findById(decoded.userId).select('-password');
         if (!user) {
             return res.status(401).json({ message: 'User not found' });
         }
@@ -781,7 +974,9 @@ router.post('/forgot-password', async (req, res) => {
             return res.status(400).json({ message: 'Email is required' });
         }
 
-        const user = await User.findOne({ email: email.toLowerCase() });
+        const user = isPostgresPrimary()
+            ? await authSql.findUserByEmail(email.toLowerCase())
+            : await User.findOne({ email: email.toLowerCase() });
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
@@ -832,10 +1027,14 @@ router.post('/verify-otp', async (req, res) => {
         }
 
         const hashedPassword = await bcrypt.hash(newPassword, 12);
-        await User.findOneAndUpdate(
-            { email: email.toLowerCase() },
-            { password: hashedPassword, emailVerified: true, registrationEmailPending: false }
-        );
+        if (isPostgresPrimary()) {
+            await authSql.setPasswordAndVerifyEmail(email, hashedPassword);
+        } else {
+            await User.findOneAndUpdate(
+                { email: email.toLowerCase() },
+                { password: hashedPassword, emailVerified: true, registrationEmailPending: false }
+            );
+        }
 
         otpStore.delete(fpKey);
 

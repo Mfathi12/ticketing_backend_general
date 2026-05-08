@@ -1,5 +1,7 @@
 const Attendance = require('../models/attendance');
 const { createNotification } = require('./notificationService');
+const { isPostgresPrimary } = require('./sql/runtime');
+const attendanceSql = require('./sql/attendanceSql');
 const {
     getAttendanceTodayString,
     startOfAttendanceDay,
@@ -17,6 +19,9 @@ const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
  * Repeats until the open session is for "today".
  */
 const processMidnightAttendanceRollover = async () => {
+    if (isPostgresPrimary()) {
+        return attendanceSql.processMidnightAttendanceRollover();
+    }
     try {
         const todayStr = getAttendanceTodayString();
 
@@ -132,6 +137,9 @@ async function rolloverUserUntilToday(userId, companyId, todayStr, openNoCheckou
  * from app.js or an external scheduler.
  */
 const sendEightHourCheckoutReminders = async () => {
+    if (isPostgresPrimary()) {
+        return attendanceSql.sendEightHourCheckoutReminders();
+    }
     try {
         const now = new Date();
 
@@ -184,6 +192,9 @@ const sendEightHourCheckoutReminders = async () => {
 
 /** Run midnight split for one user (cheap; call from check-in / check-out / my-attendance). */
 async function rolloverStaleOpenSessionsForUser(userId, companyId = null) {
+    if (isPostgresPrimary()) {
+        return attendanceSql.rolloverStaleOpenSessionsForUser(userId, companyId);
+    }
     const todayStr = getAttendanceTodayString();
     const openNoCheckout = {
         $or: [{ checkOut: { $exists: false } }, { checkOut: null }]
