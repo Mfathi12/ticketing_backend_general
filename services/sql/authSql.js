@@ -372,6 +372,7 @@ module.exports = {
     registerCompany,
     companySummaryFromRow,
     subscriptionFromRow,
+    wrapCompanyForSubscription,
     toLeanUser,
     userIncludeAuth
 };
