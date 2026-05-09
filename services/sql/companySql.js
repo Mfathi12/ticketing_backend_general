@@ -1,5 +1,5 @@
 const { getSequelizeModels } = require('../../db/postgres');
-const { subscriptionFromRow, wrapCompanyForSubscription } = require('./authSql');
+const { subscriptionFromRow, wrapCompanyForSubscription } = require('./companySubscriptionWrap');
 
 const requireModels = () => {
     const m = getSequelizeModels();
