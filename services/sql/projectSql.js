@@ -34,9 +34,17 @@ const projectToResponseShape = (projPlain, assigneeRows) => {
         updatedAt: p.updatedAt,
         assigned_users: assignees,
         toObject: function toObj() {
+            // Match the API shape (including `company`), not raw Sequelize `p` (only has companyId).
             return {
-                ...p,
                 _id: p.id,
+                id: p.id,
+                project_name: p.project_name,
+                start_date: p.start_date,
+                estimated_end_date: p.estimated_end_date,
+                company: p.companyId,
+                status: p.status,
+                createdAt: p.createdAt,
+                updatedAt: p.updatedAt,
                 assigned_users: assignees.map((x) => ({ ...x }))
             };
         }
