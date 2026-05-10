@@ -6,6 +6,7 @@ const { User, Company } = require('../models');
 const { authenticateToken } = require('../middleware/auth');
 const { sendUserInviteEmail } = require('../services/emailService');
 const { canAddMembers, getCompanyPlan } = require('../services/subscriptionService');
+const { isPostgresEnabled } = require('../db/postgres');
 const { isPostgresPrimary } = require('../services/sql/runtime');
 const authSql = require('../services/sql/authSql');
 const { loadCompanyWithMembers } = require('../services/sql/companySql');
@@ -486,15 +487,38 @@ router.put('/change-password', authenticateToken, async (req, res) => {
         if (!currentPassword || !newPassword) {
             return res.status(400).json({ message: 'Current password and new password are required' });
         }
+        if (String(newPassword).length < 6) {
+            return res.status(400).json({ message: 'New password must be at least 6 characters' });
+        }
 
-        const user = isPostgresPrimary()
-            ? await authSql.findUserById(req.user._id, { withPassword: true })
-            : await User.findById(req.user._id);
+        let user = null;
+        let storedInPostgres = false;
+
+        if (isPostgresEnabled()) {
+            try {
+                user = await authSql.findUserById(req.user._id, { withPassword: true });
+                if (user) storedInPostgres = true;
+            } catch (e) {
+                console.error('Change password: Postgres load error:', e.message);
+            }
+        }
+
+        if (!user) {
+            user = await User.findById(req.user._id);
+        }
+
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
 
         const pw = user.password;
+        if (!pw || typeof pw !== 'string') {
+            return res.status(400).json({
+                message:
+                    'No password is set on this account yet. Accept your invite or use forgot password.'
+            });
+        }
+
         const isCurrentPasswordValid = await bcrypt.compare(currentPassword, pw);
         if (!isCurrentPasswordValid) {
             return res.status(400).json({ message: 'Current password is incorrect' });
@@ -507,8 +531,12 @@ router.put('/change-password', authenticateToken, async (req, res) => {
         }
 
         const hashedNewPassword = await bcrypt.hash(newPassword, 12);
-        if (isPostgresPrimary()) {
+
+        if (storedInPostgres) {
             const m = require('../db/postgres').getSequelizeModels();
+            if (!m?.User) {
+                return res.status(500).json({ message: 'Internal server error' });
+            }
             await m.User.update({ password: hashedNewPassword }, { where: { id: String(req.user._id) } });
         } else {
             await User.findByIdAndUpdate(req.user._id, { password: hashedNewPassword });
@@ -605,15 +633,28 @@ router.post('/accept-invite', async (req, res) => {
         }
 
         const tokenHash = hashInviteToken(token);
-        if (isPostgresPrimary()) {
-            const r = await userCompanySql.acceptInviteSql(token, password, hashInviteToken);
-            if (r.error === 'invalid') {
-                return res.status(400).json({ message: 'Invalid invitation token' });
+
+        // Invites from add-account live in PostgreSQL when POSTGRES_ENABLED. Some deployments
+        // mistakenly set POSTGRES_PRIMARY=false while still storing users in PG — try PG whenever
+        // it is enabled, then fall back to Mongo only if PG is not the configured primary store.
+        if (isPostgresEnabled()) {
+            try {
+                const r = await userCompanySql.acceptInviteSql(token, password, hashInviteToken);
+                if (r.ok) {
+                    return res.json({ message: 'Invitation accepted successfully. You can now login.' });
+                }
+                if (r.error === 'expired') {
+                    return res.status(400).json({ message: 'Invitation token expired' });
+                }
+                if (isPostgresPrimary()) {
+                    return res.status(400).json({ message: 'Invalid invitation token' });
+                }
+            } catch (pgErr) {
+                console.error('Accept invite PostgreSQL error:', pgErr);
+                if (isPostgresPrimary()) {
+                    return res.status(500).json({ message: 'Internal server error' });
+                }
             }
-            if (r.error === 'expired') {
-                return res.status(400).json({ message: 'Invitation token expired' });
-            }
-            return res.json({ message: 'Invitation accepted successfully. You can now login.' });
         }
 
         const user = await User.findOne({
