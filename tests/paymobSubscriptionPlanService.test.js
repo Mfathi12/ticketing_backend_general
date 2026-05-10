@@ -5,6 +5,7 @@ const {
     cancelSubscriptionPlan
 } = require('../services/paymobSubscriptionPlanService');
 
+
 test('createSubscriptionPlan returns success object with is_active true', async () => {
     const mockClient = {
         post: async (url, body) => {
