@@ -171,7 +171,8 @@ const mergePlanWithOverride = (basePlan, overrideDoc) => {
     const merged = cloneJson(basePlan);
     if (!overrideDoc) return merged;
     const ov = overrideDoc.toObject ? overrideDoc.toObject() : { ...overrideDoc };
-    const skip = new Set(['_id', '__v', 'planId', 'createdAt', 'updatedAt']);
+    // Never copy DB primary key onto catalog objects — Sequelize raw rows use `id` for row PK and would overwrite plan slug (basic/pro/…).
+    const skip = new Set(['_id', '__v', 'id', 'planId', 'createdAt', 'updatedAt']);
     Object.keys(ov).forEach((key) => {
         if (skip.has(key)) return;
         const val = ov[key];
