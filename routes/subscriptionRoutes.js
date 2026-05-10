@@ -468,25 +468,73 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
     }
 });
 
+/** Paymob may send `extras` as JSON object or string; unified checkout shapes vary by product. */
+const parsePaymobExtras = (raw) => {
+    if (raw == null) return {};
+    if (typeof raw === 'object' && !Array.isArray(raw)) return raw;
+    if (typeof raw === 'string') {
+        try {
+            const p = JSON.parse(raw);
+            return typeof p === 'object' && p !== null && !Array.isArray(p) ? p : {};
+        } catch (_) {
+            return {};
+        }
+    }
+    return {};
+};
+
+const firstTruthyString = (...candidates) => {
+    for (const v of candidates) {
+        if (v === null || v === undefined) continue;
+        const s = String(v).trim();
+        if (s) return s;
+    }
+    return '';
+};
+
 router.post('/paymob/webhook', async (req, res) => {
     try {
-        const obj = req.body?.obj || req.body;
-        console.log('Paymob webhook payload:', JSON.stringify(obj || {}, null, 2));
-        const merchantOrderId =
-            obj?.order?.merchant_order_id ||
-            obj?.extras?.merchant_order_id ||
-            obj?.extras?.companyId ||
-            obj?.payment_key_claims?.extra?.merchant_order_id ||
-            obj?.payment_key_claims?.extra?.companyId;
-        const payloadPlanId =
-            obj?.extras?.planId ||
-            obj?.payment_key_claims?.extra?.planId;
-        const orderId = obj?.order?.id || obj?.order?.order_id || null;
+        const body = req.body || {};
+        const obj = body.obj ?? body.transaction ?? body.data ?? body;
+        console.log('Paymob webhook payload:', JSON.stringify(body || {}, null, 2));
+
+        const extras = parsePaymobExtras(obj?.extras);
+        const claimsExtra = obj?.payment_key_claims?.extra || {};
+
+        const merchantOrderId = firstTruthyString(
+            obj?.order?.merchant_order_id,
+            obj?.order?.merchantOrderId,
+            extras.merchant_order_id,
+            extras.companyId,
+            claimsExtra.merchant_order_id,
+            claimsExtra.companyId,
+            obj?.merchant_order_id,
+            body.merchant_order_id,
+            body.order?.merchant_order_id,
+            obj?.integration_order?.merchant_order_id
+        );
+
+        const payloadPlanId = firstTruthyString(
+            extras.planId,
+            claimsExtra.planId,
+            obj?.extras?.planId,
+            obj?.payment_key_claims?.extra?.planId
+        );
+
+        const orderId = obj?.order?.id || obj?.order?.order_id || body.order?.id || null;
         const success =
             obj?.success === true ||
-            String(obj?.success).toLowerCase() === 'true' ||
+            String(obj?.success ?? '').toLowerCase() === 'true' ||
             obj?.order?.payment_status === 'PAID' ||
             obj?.payment_status === 'PAID';
+
+        const explicitFailure =
+            obj?.success === false ||
+            String(obj?.success ?? '').toLowerCase() === 'false' ||
+            ['FAILED', 'DECLINED', 'CANCELLED', 'VOIDED'].includes(
+                String(obj?.order?.payment_status || obj?.payment_status || '').toUpperCase()
+            );
+
         const companyId = merchantOrderId ? String(merchantOrderId) : '';
         let company = null;
         if (companyId) {
@@ -502,11 +550,30 @@ router.post('/paymob/webhook', async (req, res) => {
                 });
         }
         if (!company) {
+            console.warn('[paymob webhook] company not found', { merchantOrderId, orderId });
             return res.status(404).json({ message: t(req.lang, 'common.company_not_found') });
         }
+
         const planId = payloadPlanId || company.subscription?.pendingPlanId;
-        if (!planId) {
-            return res.status(400).json({ message: t(req.lang, 'subscription.missing_plan_webhook') });
+
+        if (!success && !explicitFailure) {
+            // Intermediate notifications (no success flag) — do not wipe subscription or fail Paymob retries.
+            return res.status(200).json({
+                message: 'acknowledged',
+                processed: false,
+                hint: 'waiting for success callback or use POST /subscriptions/paymob/confirm after redirect'
+            });
+        }
+
+        if (success && !planId) {
+            console.warn('[paymob webhook] success but missing planId', {
+                companyId: company._id,
+                pendingPlanId: company.subscription?.pendingPlanId
+            });
+            return res.status(200).json({
+                message: t(req.lang, 'subscription.missing_plan_webhook'),
+                processed: false
+            });
         }
 
         if (success) {
@@ -535,7 +602,7 @@ router.post('/paymob/webhook', async (req, res) => {
                     null,
                 updatedAt: new Date()
             };
-        } else {
+        } else if (explicitFailure) {
             company.subscription = {
                 ...(company.subscription || {}),
                 planId: 'free',
