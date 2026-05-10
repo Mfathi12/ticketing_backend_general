@@ -24,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
           
-      - name: Deploy to Contabo VPS
+      - name: Deploy to Contabo VPS (185.190.142.44)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: 185.190.142.44
@@ -33,13 +33,77 @@ jobs:
           port: 22
           command_timeout: 30m
           script: |
-            cd /root/ticketing_backend_general || exit 1
-            git fetch origin main
+            set -e
+            echo "🚀 Starting deployment to 185.190.142.44..."
+            
+            PROJECT_DIR="/root/ticketing_backend_general"
+            BACKUP_DIR="/var/backups/app_backups"
+            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+            
+            # Create backup directory
+            mkdir -p "$BACKUP_DIR"
+            mkdir -p "$PROJECT_DIR"
+            
+            # Navigate to project
+            cd "$PROJECT_DIR"
+            
+            # Create backup of current version
+            if [ -d ".git" ]; then
+              echo "📦 Creating backup..."
+              tar -czf "$BACKUP_DIR/backup_$TIMESTAMP.tar.gz" \
+                --exclude='node_modules' \
+                --exclude='.git' \
+                --exclude='upload' \
+                . 2>/dev/null || true
+              
+              # Keep only last 5 backups
+              ls -t "$BACKUP_DIR"/backup_*.tar.gz 2>/dev/null | tail -n +6 | xargs -r rm 2>/dev/null || true
+            fi
+            
+            # Git pull - fetch and reset to latest
+            echo "📥 Pulling latest changes from main branch..."
+            git fetch origin main --verbose
             git reset --hard origin/main
-            git clean -fd -e .env -e upload
+            git clean -fd -e .env -e upload -e node_modules
+            
+            # Verify we have the latest code
+            echo "📝 Current commit:"
+            git log -1 --oneline
+            
+            # Install dependencies
+            echo "📦 Installing dependencies..."
             npm ci --production
-            pm2 reload ticket --update-env || pm2 start ecosystem.config.js
+            
+            # Restart application with PM2
+            echo "🔄 Restarting application..."
+            if pm2 describe ticket > /dev/null 2>&1; then
+              pm2 reload ticket --update-env
+            else
+              pm2 start ecosystem.config.js
+            fi
+            
             pm2 save
+            
+            # Health check
+            echo "🏥 Performing health check..."
             sleep 5
-            pm2 status
-            echo "✅ Deployment complete!"
+            if pm2 describe ticket | grep -q "online"; then
+              echo "✅ Application is running"
+              pm2 logs ticket --lines 5
+            else
+              echo "❌ Application failed to start"
+              pm2 logs ticket --lines 20
+              exit 1
+            fi
+            
+            echo "🎉 Deployment completed successfully!"
+            
+      - name: Notify deployment status
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Deployment successful!"
+          else
+            echo "❌ Deployment failed!"
+            echo "Check the logs above for details"
+          fi
