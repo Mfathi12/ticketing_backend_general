@@ -13,7 +13,8 @@ console.log('Email Pass:', process.env.EMAIL_PASS);
 // });
 
 const transporter = nodemailer.createTransport({
-  host: "mail.absai.dev",
+//   host: "mail.absai.dev",
+host: 'smtp.gmail.com',
   port: 587,  // Use 587 with STARTTLS (recommended)
   secure: false,
     // true for 465, false for 587
