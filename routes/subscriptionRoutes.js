@@ -267,6 +267,12 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         if (!company) {
             return res.status(404).json({ message: t(req.lang, 'common.company_not_found') });
         }
+        // Same lifecycle as GET /subscriptions/me: sync expiry/grace/downgrades before billing rules.
+        // Without this, checkout could think the company is still on a paid tier (false "downgrade" error)
+        // while /me already reflects Free after evaluate.
+        invalidateCompanySubscriptionEvalCache(req.companyId);
+        await evaluateAndSyncCompanySubscription(company);
+
         const now = new Date();
         const currentPlanId = normalizeSubscriptionPlanId(company.subscription?.planId);
         const hasKnownPaymobSubscription = Boolean(

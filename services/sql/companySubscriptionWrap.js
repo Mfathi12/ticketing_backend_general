@@ -3,7 +3,10 @@
  * Kept separate from authSql so companySql can load without a circular dependency on authSql.
  */
 
-const { normalizeSubscriptionPlanId } = require('../../utils/subscriptionPlanIds');
+const {
+    DEFAULT_SUBSCRIPTION_PLAN_ID,
+    normalizeSubscriptionPlanId
+} = require('../../utils/subscriptionPlanIds');
 
 const subscriptionFromRow = (row) => ({
     planId: normalizeSubscriptionPlanId(row.subscriptionPlanId),
@@ -39,7 +42,7 @@ const wrapCompanyForSubscription = (rowPlain, CompanyModel) => {
             const sub = this.subscription || {};
             await CompanyModel.update(
                 {
-                    subscriptionPlanId: sub.planId ?? 'free',
+                    subscriptionPlanId: normalizeSubscriptionPlanId(sub.planId ?? DEFAULT_SUBSCRIPTION_PLAN_ID),
                     subscriptionStatus: sub.status ?? 'active',
                     subscriptionIsTrial: Boolean(sub.isTrial),
                     subscriptionTrialEndsAt: sub.trialEndsAt ?? null,

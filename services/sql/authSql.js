@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
 const { getSequelizeModels, getSequelize } = require('../../db/postgres');
 const { subscriptionFromRow, wrapCompanyForSubscription } = require('./companySubscriptionWrap');
+const { DEFAULT_SUBSCRIPTION_PLAN_ID } = require('../../utils/subscriptionPlanIds');
 
 const requireModels = () => {
     const m = getSequelizeModels();
@@ -245,7 +246,7 @@ const registerCompany = async ({
                 name: trimmedCompanyName,
                 email: normalizedEmail,
                 ownerUserId: ownerId,
-                subscriptionPlanId: 'free',
+                subscriptionPlanId: DEFAULT_SUBSCRIPTION_PLAN_ID,
                 subscriptionStatus: 'active',
                 subscriptionIsTrial: false,
                 subscriptionTrialEndsAt: null,

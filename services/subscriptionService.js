@@ -5,6 +5,7 @@ const { getSequelizeModels, isPostgresEnabled, startPostgresInit } = require('..
 const { localizePlan, normalizeLang } = require('../utils/i18n');
 const {
     PLAN_IDS,
+    DEFAULT_SUBSCRIPTION_PLAN_ID,
     normalizeSubscriptionPlanId,
     getSubscriptionPlanRank
 } = require('../utils/subscriptionPlanIds');
@@ -691,6 +692,7 @@ const evaluateAndSyncCompanySubscription = async (company, now = new Date()) => 
 module.exports = {
     SUBSCRIPTION_PLANS,
     PLAN_IDS,
+    DEFAULT_SUBSCRIPTION_PLAN_ID,
     GRACE_PERIOD_DAYS,
     normalizeSubscriptionPlanId,
     getSubscriptionPlanRank,

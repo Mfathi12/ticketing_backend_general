@@ -1,5 +1,6 @@
 const { DataTypes } = require('sequelize');
 const mongoose = require('mongoose');
+const { DEFAULT_SUBSCRIPTION_PLAN_ID } = require('../../../utils/subscriptionPlanIds');
 
 const newObjectIdString = () => new mongoose.Types.ObjectId().toString();
 
@@ -49,7 +50,11 @@ const defineModels = (sequelize) => {
                 defaultValue: 'active'
             },
             deletedAt: { type: DataTypes.DATE, defaultValue: null },
-            subscriptionPlanId: { type: DataTypes.STRING, allowNull: false, defaultValue: 'free' },
+            subscriptionPlanId: {
+                type: DataTypes.STRING,
+                allowNull: false,
+                defaultValue: DEFAULT_SUBSCRIPTION_PLAN_ID
+            },
             subscriptionStatus: {
                 type: DataTypes.ENUM('active', 'pending', 'expired', 'cancelled'),
                 allowNull: false,
