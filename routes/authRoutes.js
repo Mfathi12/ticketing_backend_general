@@ -10,16 +10,19 @@ const { getCompanyPlan, evaluateAndSyncCompanySubscription } = require('../servi
 const { isPostgresPrimary } = require('../services/sql/runtime');
 const { waitForPostgres } = require('../db/postgres');
 const authSql = require('../services/sql/authSql');
+const otpSql = require('../services/sql/otpSql');
 require('dotenv').config();
 
 const router = express.Router();
 
-// Store OTPs temporarily (in production, use Redis or database)
+/** In-memory OTPs when MongoDB is primary (single process). PostgreSQL uses `auth_email_otps` for PM2-safe storage. */
 const otpStore = new Map();
 
-/** Forgot-password OTP keys must not collide with registration OTP keys. */
 const otpKeyForgotPassword = (email) => `pw:${String(email).toLowerCase().trim()}`;
 const otpKeyRegistration = (email) => `reg:${String(email).toLowerCase().trim()}`;
+
+const OTP_PURPOSE_REG = 'registration';
+const OTP_PURPOSE_FP = 'forgot_password';
 
 /** Max time after JWT `exp` that POST /refresh still accepts the token. */
 const MAX_REFRESH_AFTER_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
@@ -31,8 +34,53 @@ const generateOTP = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
 };
 
-const storeRegistrationOtp = (email, otp) => {
-    otpStore.set(otpKeyRegistration(email), { otp, expiryTime: Date.now() + REGISTRATION_OTP_TTL_MS });
+const persistRegistrationOtp = async (normalizedEmail, otp) => {
+    const expiryTime = Date.now() + REGISTRATION_OTP_TTL_MS;
+    if (isPostgresPrimary()) {
+        await otpSql.upsertOtp(normalizedEmail, OTP_PURPOSE_REG, otp, expiryTime);
+    } else {
+        otpStore.set(otpKeyRegistration(normalizedEmail), { otp, expiryTime });
+    }
+};
+
+const readRegistrationOtp = async (normalizedEmail) => {
+    if (isPostgresPrimary()) {
+        return otpSql.getOtp(normalizedEmail, OTP_PURPOSE_REG);
+    }
+    const v = otpStore.get(otpKeyRegistration(normalizedEmail));
+    return v ? { otp: v.otp, expiryTime: v.expiryTime } : null;
+};
+
+const removeRegistrationOtp = async (normalizedEmail) => {
+    if (isPostgresPrimary()) {
+        await otpSql.deleteOtp(normalizedEmail, OTP_PURPOSE_REG);
+    } else {
+        otpStore.delete(otpKeyRegistration(normalizedEmail));
+    }
+};
+
+const persistForgotPasswordOtp = async (normalizedEmail, otp, expiryTime) => {
+    if (isPostgresPrimary()) {
+        await otpSql.upsertOtp(normalizedEmail, OTP_PURPOSE_FP, otp, expiryTime);
+    } else {
+        otpStore.set(otpKeyForgotPassword(normalizedEmail), { otp, expiryTime });
+    }
+};
+
+const readForgotPasswordOtp = async (normalizedEmail) => {
+    if (isPostgresPrimary()) {
+        return otpSql.getOtp(normalizedEmail, OTP_PURPOSE_FP);
+    }
+    const v = otpStore.get(otpKeyForgotPassword(normalizedEmail));
+    return v ? { otp: v.otp, expiryTime: v.expiryTime } : null;
+};
+
+const removeForgotPasswordOtp = async (normalizedEmail) => {
+    if (isPostgresPrimary()) {
+        await otpSql.deleteOtp(normalizedEmail, OTP_PURPOSE_FP);
+    } else {
+        otpStore.delete(otpKeyForgotPassword(normalizedEmail));
+    }
 };
 
 /**
@@ -332,7 +380,7 @@ router.post('/register-company', async (req, res) => {
 
             if (ownerUser.registrationEmailPending === true) {
                 const otp = generateOTP();
-                storeRegistrationOtp(normalizedEmail, otp);
+                await persistRegistrationOtp(normalizedEmail, otp);
                 try {
                     await sendRegistrationOTPEmail(normalizedEmail, otp, trimmedCompanyName);
                 } catch (mailErr) {
@@ -547,7 +595,7 @@ router.post('/register-company', async (req, res) => {
 
         if (ownerUser.registrationEmailPending === true) {
             const otp = generateOTP();
-            storeRegistrationOtp(normalizedEmail, otp);
+            await persistRegistrationOtp(normalizedEmail, otp);
             try {
                 await sendRegistrationOTPEmail(normalizedEmail, otp, trimmedCompanyName);
             } catch (mailErr) {
@@ -642,13 +690,12 @@ router.post('/verify-registration-otp', async (req, res) => {
         }
 
         const normalizedEmail = String(email).toLowerCase().trim();
-        const regKey = otpKeyRegistration(normalizedEmail);
-        const stored = otpStore.get(regKey);
+        const stored = await readRegistrationOtp(normalizedEmail);
         if (!stored) {
             return res.status(400).json({ message: 'Code not found or expired. Request a new one.' });
         }
         if (Date.now() > stored.expiryTime) {
-            otpStore.delete(regKey);
+            await removeRegistrationOtp(normalizedEmail);
             return res.status(400).json({ message: 'Code expired' });
         }
         if (stored.otp !== String(otp).trim()) {
@@ -659,11 +706,11 @@ router.post('/verify-registration-otp', async (req, res) => {
             ? await authSql.findUserByEmail(normalizedEmail)
             : await User.findOne({ email: normalizedEmail });
         if (!user) {
-            otpStore.delete(regKey);
+            await removeRegistrationOtp(normalizedEmail);
             return res.status(404).json({ message: 'User not found' });
         }
         if (user.registrationEmailPending !== true) {
-            otpStore.delete(regKey);
+            await removeRegistrationOtp(normalizedEmail);
             return res.status(400).json({ message: 'This account is already verified. Log in with your password.' });
         }
 
@@ -676,7 +723,7 @@ router.post('/verify-registration-otp', async (req, res) => {
             await user.save();
             verifiedUser = user;
         }
-        otpStore.delete(regKey);
+        await removeRegistrationOtp(normalizedEmail);
 
         return writeLoginSuccessResponse(res, verifiedUser, { bodyCompanyId, fcmToken });
     } catch (error) {
@@ -711,7 +758,7 @@ router.post('/resend-registration-otp', async (req, res) => {
         }
 
         const otp = generateOTP();
-        storeRegistrationOtp(normalizedEmail, otp);
+        await persistRegistrationOtp(normalizedEmail, otp);
         await sendRegistrationOTPEmail(
             normalizedEmail,
             otp,
@@ -974,9 +1021,11 @@ router.post('/forgot-password', async (req, res) => {
             return res.status(400).json({ message: 'Email is required' });
         }
 
+        const normalizedForgotEmail = String(email).toLowerCase().trim();
+
         const user = isPostgresPrimary()
-            ? await authSql.findUserByEmail(email.toLowerCase())
-            : await User.findOne({ email: email.toLowerCase() });
+            ? await authSql.findUserByEmail(normalizedForgotEmail)
+            : await User.findOne({ email: normalizedForgotEmail });
         if (!user) {
             return res.status(404).json({ message: 'User not found' });
         }
@@ -990,9 +1039,9 @@ router.post('/forgot-password', async (req, res) => {
         const otp = generateOTP();
         const expiryTime = Date.now() + 10 * 60 * 1000; // 10 minutes
 
-        otpStore.set(otpKeyForgotPassword(email), { otp, expiryTime });
+        await persistForgotPasswordOtp(normalizedForgotEmail, otp, expiryTime);
 
-        await sendOTPEmail(email, otp);
+        await sendOTPEmail(normalizedForgotEmail, otp);
 
         res.json({ message: 'OTP sent to your email' });
     } catch (error) {
@@ -1011,32 +1060,40 @@ router.post('/verify-otp', async (req, res) => {
             return res.status(400).json({ message: 'Email, OTP, and new password are required' });
         }
 
-        const fpKey = otpKeyForgotPassword(email);
-        const storedOTP = otpStore.get(fpKey);
+        const normalizedEmail = String(email).toLowerCase().trim();
+        const storedOTP = await readForgotPasswordOtp(normalizedEmail);
         if (!storedOTP) {
+            const regPending = await readRegistrationOtp(normalizedEmail);
+            if (regPending) {
+                return res.status(400).json({
+                    message:
+                        'This code is for email verification (new account), not password reset. Use POST /api/auth/verify-registration-otp with email and otp only.',
+                    useEndpoint: '/api/auth/verify-registration-otp'
+                });
+            }
             return res.status(400).json({ message: 'OTP not found or expired' });
         }
 
         if (Date.now() > storedOTP.expiryTime) {
-            otpStore.delete(fpKey);
+            await removeForgotPasswordOtp(normalizedEmail);
             return res.status(400).json({ message: 'OTP expired' });
         }
 
-        if (storedOTP.otp !== otp) {
+        if (storedOTP.otp !== String(otp).trim()) {
             return res.status(400).json({ message: 'Invalid OTP' });
         }
 
         const hashedPassword = await bcrypt.hash(newPassword, 12);
         if (isPostgresPrimary()) {
-            await authSql.setPasswordAndVerifyEmail(email, hashedPassword);
+            await authSql.setPasswordAndVerifyEmail(normalizedEmail, hashedPassword);
         } else {
             await User.findOneAndUpdate(
-                { email: email.toLowerCase() },
+                { email: normalizedEmail },
                 { password: hashedPassword, emailVerified: true, registrationEmailPending: false }
             );
         }
 
-        otpStore.delete(fpKey);
+        await removeForgotPasswordOtp(normalizedEmail);
 
         res.json({ message: 'Password reset successfully' });
     } catch (error) {
