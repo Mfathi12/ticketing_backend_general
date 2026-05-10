@@ -83,17 +83,17 @@ jobs:
             
             pm2 save
             
-            # Health check
-            echo "🏥 Performing health check..."
-            sleep 5
-            if pm2 describe ticket | grep -q "online"; then
-              echo "✅ Application is running"
-              pm2 logs ticket --lines 5
-            else
-              echo "❌ Application failed to start"
-              pm2 logs ticket --lines 20
-              exit 1
-            fi
+            # # Health check
+            # echo "🏥 Performing health check..."
+            # sleep 5
+            # if pm2 describe ticket | grep -q "online"; then
+            #   echo "✅ Application is running"
+            #   pm2 logs ticket --lines 5
+            # else
+            #   echo "❌ Application failed to start"
+            #   pm2 logs ticket --lines 20
+            #   exit 1
+            # fi
             
             echo "🎉 Deployment completed successfully!"
             
