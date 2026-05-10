@@ -318,14 +318,16 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
 
         const unitPrice = resolveCheckoutUnitPrice(targetPlan);
         const amountCents = amountToCents(unitPrice);
+        /** Paymob expects integer piasters/cents ≥ 1; both `amount` and `amount_cents` are sent for API compatibility. */
+        const amountPiasters = Math.max(1, Math.round(Number(amountCents)));
         // Should not happen after resolveCheckoutUnitPrice + Paymob minimum; kept as a safeguard.
-        if (!Number.isFinite(amountCents) || amountCents < 1) {
+        if (!Number.isFinite(amountPiasters) || amountPiasters < 1) {
             return res.status(400).json({
                 message: t(req.lang, 'subscription.invalid_plan_amount'),
                 planId: targetPlan.id,
                 price: targetPlan.price,
                 resolvedPrice: unitPrice,
-                amountCents
+                amountPiasters
             });
         }
         const merchantOrderId = String(req.companyId);
@@ -338,7 +340,8 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         };
 
         const intentionPayload = {
-                amount: amountCents,
+                amount: amountPiasters,
+                amount_cents: amountPiasters,
                 currency: targetPlan.currency || 'EGP',
                 merchant_order_id: merchantOrderId,
                 redirection_url: paymobRedirectUrl,
@@ -346,7 +349,8 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
                 items: [
                     {
                         name: `${targetPlan.name} Subscription`,
-                        amount: amountCents,
+                        amount: amountPiasters,
+                        amount_cents: amountPiasters,
                         description: targetPlan.description || 'Subscription payment',
                         quantity: 1
                     }
@@ -367,8 +371,19 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
                     paymentMethod: normalizedPaymentMethod
                 }
             };
-        if (subscriptionPlanId) {
-            intentionPayload.subscription_plan_id = subscriptionPlanId;
+        /**
+         * If Paymob dashboard subscription plan has amount 0 / mismatch, intention validation can fail with amount≥1.
+         * Set PAYMOB_INTENTION_INCLUDE_SUBSCRIPTION_PLAN_ID=false to charge using catalog amount only (no recurring template id on intention).
+         */
+        const includeSubscriptionPlanId =
+            subscriptionPlanId &&
+            String(process.env.PAYMOB_INTENTION_INCLUDE_SUBSCRIPTION_PLAN_ID ?? 'true').toLowerCase() !==
+                'false';
+        if (includeSubscriptionPlanId) {
+            const sid = Number(subscriptionPlanId);
+            if (Number.isFinite(sid) && sid > 0) {
+                intentionPayload.subscription_plan_id = sid;
+            }
         }
 
         const intentionRes = await axios.post(

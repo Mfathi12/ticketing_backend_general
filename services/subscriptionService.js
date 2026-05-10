@@ -138,14 +138,27 @@ const cloneJson = (obj) => JSON.parse(JSON.stringify(obj));
 const MIN_CHECKOUT_UNIT_PRICE = 0.01;
 
 /**
+ * Parses catalog/admin price: strips thousand separators (e.g. "2,000") so saving does not become NaN → 0.
+ */
+const parseCatalogUnitPrice = (val) => {
+    if (val == null || val === '') return NaN;
+    const s = String(val)
+        .replace(/,/g, '')
+        .replace(/\u066C/g, '')
+        .trim();
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : NaN;
+};
+
+/**
  * Final unit price (EGP etc.) for Paymob: uses merged catalog price, falls back to static defaults, never invalid/zero for paid.
  */
 const resolveCheckoutUnitPrice = (plan) => {
     const id = normalizeSubscriptionPlanId(plan?.id);
     const fallback = SUBSCRIPTION_PLANS.find((p) => p.id === id);
-    let n = Number(plan?.price);
+    let n = parseCatalogUnitPrice(plan?.price);
     if (!Number.isFinite(n) || n < MIN_CHECKOUT_UNIT_PRICE) {
-        n = Number(fallback?.price);
+        n = parseCatalogUnitPrice(fallback?.price);
     }
     if (!Number.isFinite(n) || n < MIN_CHECKOUT_UNIT_PRICE) {
         if (id === 'free') return 0;
@@ -170,11 +183,11 @@ const mergePlanWithOverride = (basePlan, overrideDoc) => {
                 if (lv !== undefined) merged.limits[lk] = lv;
             });
         } else if (key === 'price' && merged.id !== 'free') {
-            const n = Number(val);
+            const n = parseCatalogUnitPrice(val);
             if (!Number.isFinite(n) || n <= 0) {
                 return;
             }
-            merged[key] = val;
+            merged[key] = n;
         } else {
             merged[key] = val;
         }
@@ -739,5 +752,6 @@ module.exports = {
     mergePlanWithOverride,
     getPlansSourceList,
     resolveCheckoutUnitPrice,
+    parseCatalogUnitPrice,
     MIN_CHECKOUT_UNIT_PRICE
 };
