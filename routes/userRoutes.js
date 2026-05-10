@@ -230,7 +230,7 @@ router.post('/add-account', authenticateToken, async (req, res) => {
             : !targetUser.password || (targetUser.invite && targetUser.invite.tokenHash === inviteTokenHash);
         let inviteLink = null;
         if (shouldSendInvite) {
-            const frontendBaseUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '');
+            const frontendBaseUrl = ('https://tik.absai.dev').replace(/\/+$/, '');
             inviteLink = `${frontendBaseUrl}/accept-invite?token=${encodeURIComponent(inviteToken)}`;
             try {
                 await sendUserInviteEmail({
