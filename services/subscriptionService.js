@@ -146,6 +146,12 @@ const mergePlanWithOverride = (basePlan, overrideDoc) => {
                 const lv = val[lk];
                 if (lv !== undefined) merged.limits[lk] = lv;
             });
+        } else if (key === 'price' && merged.id !== 'free') {
+            const n = Number(val);
+            if (!Number.isFinite(n) || n <= 0) {
+                return;
+            }
+            merged[key] = val;
         } else {
             merged[key] = val;
         }

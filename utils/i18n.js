@@ -32,7 +32,9 @@ const dictionaries = {
             paymob_api_key_required: 'PAYMOB_API_KEY is required to manage recurring subscriptions',
             plan_missing_subscription_plan_id: 'Plan is missing Paymob subscription plan ID',
             notice_grace: 'Your subscription expired. Grace period ends in {{days}} day(s).',
-            notice_downgraded: 'Your grace period ended and your subscription has been downgraded to Free.'
+            notice_downgraded: 'Your grace period ended and your subscription has been downgraded to Free.',
+            invalid_plan_amount:
+                'This plan has no valid price for checkout (amount must be at least 0.01 EGP). Update the plan price in Platform admin → Plan catalog, or remove a zero price override.'
         },
         plans: {
             monthly: 'Monthly',
@@ -101,7 +103,9 @@ const dictionaries = {
             paymob_api_key_required: 'مفتاح PAYMOB_API_KEY مطلوب لإدارة الاشتراكات التلقائية',
             plan_missing_subscription_plan_id: 'معرّف خطة الاشتراك في Paymob غير متوفر لهذه الباقة',
             notice_grace: 'انتهى الاشتراك. فترة السماح تنتهي بعد {{days}} يوم.',
-            notice_downgraded: 'انتهت فترة السماح وتم التحويل إلى الباقة المجانية.'
+            notice_downgraded: 'انتهت فترة السماح وتم التحويل إلى الباقة المجانية.',
+            invalid_plan_amount:
+                'لا يوجد سعر صالح لهذه الباقة للدفع (الحد الأدنى 0.01 جنيه). حدّث السعر من لوحة الأدمن → كتالوج الباقات، أو أزل التعديل الذي يضع السعر صفرًا.'
         },
         plans: {
             monthly: 'شهريًا',

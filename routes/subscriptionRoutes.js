@@ -316,6 +316,15 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         // later from webhook/confirm when available.
 
         const amountCents = amountToCents(targetPlan.price);
+        // Paymob rejects total amount < 1 (minor units). Zero happens when catalog override sets price to 0 or price is missing/invalid.
+        if (!Number.isFinite(amountCents) || amountCents < 1) {
+            return res.status(400).json({
+                message: t(req.lang, 'subscription.invalid_plan_amount'),
+                planId: targetPlan.id,
+                price: targetPlan.price,
+                amountCents
+            });
+        }
         const merchantOrderId = String(req.companyId);
         const billingData = {
             ...buildBillingData(company, req.user),
@@ -419,10 +428,24 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
             }, req.lang)
         });
     } catch (error) {
-        console.error('Paymob checkout error:', error?.response?.data || error.message);
+        const ax = error?.response;
+        const data = ax?.data;
+        console.error('Paymob checkout error:', data || error.message);
+        if (ax?.status === 400 && data?.error?.amount) {
+            return res.status(400).json({
+                message: t(req.lang, 'subscription.invalid_plan_amount'),
+                details: data.error
+            });
+        }
+        if (ax?.status && ax.status >= 400 && ax.status < 500) {
+            return res.status(ax.status).json({
+                message: data?.message || t(req.lang, 'common.internal_server_error'),
+                error: data?.error || data
+            });
+        }
         res.status(500).json({
             message: t(req.lang, 'common.internal_server_error'),
-            error: error?.response?.data || error.message
+            error: data || error.message
         });
     }
 });
