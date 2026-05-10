@@ -14,7 +14,9 @@ const {
     addMonths,
     GRACE_PERIOD_DAYS,
     evaluateAndSyncCompanySubscription,
-    invalidateCompanySubscriptionEvalCache
+    invalidateCompanySubscriptionEvalCache,
+    normalizeSubscriptionPlanId,
+    getSubscriptionPlanRank
 } = require('../services/subscriptionService');
 const { t, localizePlan } = require('../utils/i18n');
 
@@ -27,8 +29,6 @@ const amountToCents = (amount) => Math.round(Number(amount || 0) * 100);
 const PAYMENT_METHOD_LIST = ['card'];
 const PAYMOB_BASE_URL = process.env.PAYMOB_BASE_URL || 'https://accept.paymob.com';
 let paymobAuthTokenCache = { token: null, expiresAt: 0 };
-const PLAN_RANK = { free: 0, basic: 1, pro: 2, enterprise: 3 };
-
 /** Origins allowed for Paymob return after checkout (prevents open redirects). */
 const addRedirectOrigin = (set, raw) => {
     if (!raw || typeof raw !== 'string') return;
@@ -162,11 +162,6 @@ const extractSubscriptionIdFromUrl = (urlValue) => {
     }
 };
 
-const getPlanRank = (planId) => {
-    const key = String(planId || 'free').toLowerCase();
-    return PLAN_RANK[key] ?? 0;
-};
-
 const getPaymobAuthToken = async () => {
     const now = Date.now();
     if (paymobAuthTokenCache.token && paymobAuthTokenCache.expiresAt > now + 10_000) {
@@ -243,7 +238,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
 
         const { planId, paymentMethod, name, email, phoneNumber, country } = req.body;
         const normalizedPaymentMethod = String(paymentMethod || 'card').toLowerCase();
-        const targetPlan = getPlanById(planId);
+        const targetPlan = getPlanById(normalizeSubscriptionPlanId(planId));
         if (!targetPlan || targetPlan.id === 'free') {
             return res.status(400).json({ message: t(req.lang, 'subscription.select_paid_plan') });
         }
@@ -273,7 +268,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
             return res.status(404).json({ message: t(req.lang, 'common.company_not_found') });
         }
         const now = new Date();
-        const currentPlanId = company.subscription?.planId || 'free';
+        const currentPlanId = normalizeSubscriptionPlanId(company.subscription?.planId);
         const hasKnownPaymobSubscription = Boolean(
             company.subscription?.paymobSubscriptionId &&
             String(company.subscription.paymobSubscriptionId).trim() !== ''
@@ -301,7 +296,7 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
 
         const isDowngradeAttempt =
             currentPlanId !== 'free' &&
-            getPlanRank(targetPlan.id) < getPlanRank(currentPlanId);
+            getSubscriptionPlanRank(targetPlan.id) < getSubscriptionPlanRank(currentPlanId);
         if (isDowngradeAttempt) {
             return res.status(400).json({
                 message: 'Downgrading to a lower plan is not allowed.',

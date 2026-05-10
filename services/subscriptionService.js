@@ -3,6 +3,11 @@ const { Op } = require('sequelize');
 const { SubscriptionPlanContent, PlanCatalogOverride } = require('../models');
 const { getSequelizeModels, isPostgresEnabled, startPostgresInit } = require('../db/postgres');
 const { localizePlan, normalizeLang } = require('../utils/i18n');
+const {
+    PLAN_IDS,
+    normalizeSubscriptionPlanId,
+    getSubscriptionPlanRank
+} = require('../utils/subscriptionPlanIds');
 const hasArabicChars = (value) => /[\u0600-\u06FF]/.test(String(value || ''));
 
 /** Plan translation + catalog override rows live in Postgres when enabled and models are ready. */
@@ -14,8 +19,6 @@ const useSqlPlanTables = () => {
 
 /** Avoid Mongoose plan queries when Mongo is not connected (e.g. `bufferCommands = false` with no URI). */
 const mongoosePlansReady = () => mongoose.connection.readyState === 1;
-
-const PLAN_IDS = ['free', 'basic', 'pro', 'enterprise'];
 
 const SUBSCRIPTION_PLANS = [
     {
@@ -183,14 +186,13 @@ const refreshPlanCatalogCache = async () => {
 };
 
 const getPlanById = (planId) => {
-    const id = String(planId || 'free').toLowerCase();
+    const id = normalizeSubscriptionPlanId(planId);
     const list = getPlansSourceList();
     return list.find((plan) => plan.id === id) || list[0];
 };
 
 const getCompanyPlan = (company) => {
-    const planId = company?.subscription?.planId || 'free';
-    return getPlanById(planId);
+    return getPlanById(company?.subscription?.planId);
 };
 
 const serializePlans = () =>
@@ -522,6 +524,8 @@ const evaluateAndSyncCompanySubscriptionCore = async (company, now = new Date())
         company.subscription = {};
     }
 
+    company.subscription.planId = normalizeSubscriptionPlanId(company.subscription.planId);
+
     const currentPlanId = company.subscription.planId || 'free';
     if (company.subscription.status === 'pending') {
         return {
@@ -688,6 +692,8 @@ module.exports = {
     SUBSCRIPTION_PLANS,
     PLAN_IDS,
     GRACE_PERIOD_DAYS,
+    normalizeSubscriptionPlanId,
+    getSubscriptionPlanRank,
     getPlanById,
     getCompanyPlan,
     serializePlans,
