@@ -45,8 +45,16 @@ const mapCompaniesWithMembership = async (memberships = []) => {
     });
 };
 const createInviteToken = () => crypto.randomBytes(32).toString('hex');
+
+/** Normalize invite tokens so hashing matches after email clients / browsers alter the URL (case, ZWSP, etc.). */
+const normalizeInviteToken = (token) =>
+    String(token)
+        .trim()
+        .replace(/[\u200B-\u200D\uFEFF]/g, '')
+        .toLowerCase();
+
 const hashInviteToken = (token) =>
-    crypto.createHash('sha256').update(String(token)).digest('hex');
+    crypto.createHash('sha256').update(normalizeInviteToken(token)).digest('hex');
 const COMPANY_ROLES = ['owner', 'admin', 'manager', 'developer', 'tester', 'user'];
 const canManageActiveCompanyUsers = (req) => {
     const m = req.companyMembership;
