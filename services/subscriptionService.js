@@ -103,7 +103,10 @@ const SUBSCRIPTION_PLANS = [
         id: 'enterprise',
         name: 'Enterprise',
         description: 'For organizations with 30+ members',
-        price: Number(process.env.PAYMOB_ENTERPRISE_PRICE || 400),
+        price: (() => {
+            const n = Number(process.env.PAYMOB_ENTERPRISE_PRICE);
+            return Number.isFinite(n) && n >= 0.01 ? n : 400;
+        })(),
         currency: 'EGP',
         billingPeriod: 'monthly',
         features: [
@@ -130,6 +133,26 @@ const SUBSCRIPTION_PLANS = [
 const GRACE_PERIOD_DAYS = 7;
 
 const cloneJson = (obj) => JSON.parse(JSON.stringify(obj));
+
+/** Paid tiers must charge at least 0.01 major units for Paymob (amount ≥ 1 minor unit). */
+const MIN_CHECKOUT_UNIT_PRICE = 0.01;
+
+/**
+ * Final unit price (EGP etc.) for Paymob: uses merged catalog price, falls back to static defaults, never invalid/zero for paid.
+ */
+const resolveCheckoutUnitPrice = (plan) => {
+    const id = normalizeSubscriptionPlanId(plan?.id);
+    const fallback = SUBSCRIPTION_PLANS.find((p) => p.id === id);
+    let n = Number(plan?.price);
+    if (!Number.isFinite(n) || n < MIN_CHECKOUT_UNIT_PRICE) {
+        n = Number(fallback?.price);
+    }
+    if (!Number.isFinite(n) || n < MIN_CHECKOUT_UNIT_PRICE) {
+        if (id === 'free') return 0;
+        return MIN_CHECKOUT_UNIT_PRICE;
+    }
+    return n;
+};
 
 const mergePlanWithOverride = (basePlan, overrideDoc) => {
     const merged = cloneJson(basePlan);
@@ -714,5 +737,7 @@ module.exports = {
     invalidateCompanySubscriptionEvalCache,
     refreshPlanCatalogCache,
     mergePlanWithOverride,
-    getPlansSourceList
+    getPlansSourceList,
+    resolveCheckoutUnitPrice,
+    MIN_CHECKOUT_UNIT_PRICE
 };

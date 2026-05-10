@@ -16,7 +16,8 @@ const {
     evaluateAndSyncCompanySubscription,
     invalidateCompanySubscriptionEvalCache,
     normalizeSubscriptionPlanId,
-    getSubscriptionPlanRank
+    getSubscriptionPlanRank,
+    resolveCheckoutUnitPrice
 } = require('../services/subscriptionService');
 const { t, localizePlan } = require('../utils/i18n');
 
@@ -315,13 +316,15 @@ router.post('/paymob/checkout', authenticateToken, async (req, res) => {
         // Payment can still proceed and subscription/paymobSubscriptionId can be captured
         // later from webhook/confirm when available.
 
-        const amountCents = amountToCents(targetPlan.price);
-        // Paymob rejects total amount < 1 (minor units). Zero happens when catalog override sets price to 0 or price is missing/invalid.
+        const unitPrice = resolveCheckoutUnitPrice(targetPlan);
+        const amountCents = amountToCents(unitPrice);
+        // Should not happen after resolveCheckoutUnitPrice + Paymob minimum; kept as a safeguard.
         if (!Number.isFinite(amountCents) || amountCents < 1) {
             return res.status(400).json({
                 message: t(req.lang, 'subscription.invalid_plan_amount'),
                 planId: targetPlan.id,
                 price: targetPlan.price,
+                resolvedPrice: unitPrice,
                 amountCents
             });
         }
