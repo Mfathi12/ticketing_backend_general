@@ -713,6 +713,7 @@ router.post('/verify-registration-otp', async (req, res) => {
             await removeRegistrationOtp(normalizedEmail);
             return res.status(400).json({ message: 'This account is already verified. Log in with your password.' });
         }
+        
 
         let verifiedUser = user;
         if (isPostgresPrimary()) {
