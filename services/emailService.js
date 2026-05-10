@@ -43,6 +43,7 @@ async function sendTestEmail(to, subject, text, html) {
       html: html,
     });
     
+    
     console.log('Email sent:', info.messageId);
     return { success: true, messageId: info.messageId };
   } catch (error) {
