@@ -189,7 +189,8 @@ const registerCompany = async ({
     trimmedOwnerName,
     normalizedEmail,
     password,
-    existingOwnerUser
+    existingOwnerUser,
+    setMissingPasswordPlain
 }) => {
     const { User, Company, UserCompany, CompanyMember } = requireModels();
     const sql = getSequelize();
@@ -199,6 +200,17 @@ const registerCompany = async ({
 
         if (existingOwnerUser) {
             ownerId = String(existingOwnerUser._id);
+            if (setMissingPasswordPlain) {
+                const hashedPassword = await bcrypt.hash(String(setMissingPasswordPlain), 12);
+                await User.update(
+                    {
+                        password: hashedPassword,
+                        emailVerified: true,
+                        registrationEmailPending: false
+                    },
+                    { where: { id: ownerId }, transaction: t }
+                );
+            }
             const normalizedOwnerName = String(trimmedOwnerName || '').trim();
             const currentName = String(existingOwnerUser.name || '').trim();
             if (normalizedOwnerName && normalizedOwnerName !== currentName) {

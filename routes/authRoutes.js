@@ -322,25 +322,30 @@ router.post('/register-company', async (req, res) => {
 
         if (isPostgresPrimary()) {
             let ownerUserSql = await authSql.findUserByEmail(normalizedEmail, { withPassword: true });
+            let setMissingPasswordPlain = null;
             if (ownerUserSql) {
-                if (!ownerUserSql.password || typeof ownerUserSql.password !== 'string') {
-                    return res.status(400).json({
-                        message: 'Existing account has no password. Please reset password first, then create company.'
-                    });
-                }
-                const isPasswordValid = await bcrypt.compare(password, ownerUserSql.password);
-                if (!isPasswordValid) {
-                    return res.status(401).json({
-                        message:
-                            'Invalid credentials for existing user. Use your current account password to add another company.'
-                    });
-                }
                 if (ownerUserSql.registrationEmailPending === true) {
                     return res.status(403).json({
                         message:
                             'This email has a registration pending email verification. Enter the code from your inbox, or use POST /api/auth/resend-registration-otp.',
                         requiresEmailVerification: true
                     });
+                }
+                const hasPassword =
+                    ownerUserSql.password &&
+                    typeof ownerUserSql.password === 'string' &&
+                    String(ownerUserSql.password).trim().length > 0;
+                if (hasPassword) {
+                    const isPasswordValid = await bcrypt.compare(password, ownerUserSql.password);
+                    if (!isPasswordValid) {
+                        return res.status(401).json({
+                            message:
+                                'Invalid credentials for existing user. Use your current account password to add another company.'
+                        });
+                    }
+                } else {
+                    /** Invited / legacy account with no password: same signup form sets password + new company. */
+                    setMissingPasswordPlain = password;
                 }
             }
 
@@ -352,7 +357,8 @@ router.post('/register-company', async (req, res) => {
                     trimmedOwnerName,
                     normalizedEmail,
                     password,
-                    existingOwnerUser: ownerUserSql || undefined
+                    existingOwnerUser: ownerUserSql || undefined,
+                    setMissingPasswordPlain
                 });
                 ownerUser = result.ownerUser;
                 company = result.company;
@@ -466,23 +472,30 @@ router.post('/register-company', async (req, res) => {
         let ownerUser = await User.findOne({ email: normalizedEmail });
 
         if (ownerUser) {
-            if (!ownerUser.password || typeof ownerUser.password !== 'string') {
-                return res.status(400).json({
-                    message: 'Existing account has no password. Please reset password first, then create company.'
-                });
-            }
-            const isPasswordValid = await bcrypt.compare(password, ownerUser.password);
-            if (!isPasswordValid) {
-                return res.status(401).json({
-                    message: 'Invalid credentials for existing user. Use your current account password to add another company.'
-                });
-            }
             if (ownerUser.registrationEmailPending === true) {
                 return res.status(403).json({
                     message:
                         'This email has a registration pending email verification. Enter the code from your inbox, or use POST /api/auth/resend-registration-otp.',
                     requiresEmailVerification: true
                 });
+            }
+            const hasPassword =
+                ownerUser.password &&
+                typeof ownerUser.password === 'string' &&
+                String(ownerUser.password).trim().length > 0;
+            if (hasPassword) {
+                const isPasswordValid = await bcrypt.compare(password, ownerUser.password);
+                if (!isPasswordValid) {
+                    return res.status(401).json({
+                        message:
+                            'Invalid credentials for existing user. Use your current account password to add another company.'
+                    });
+                }
+            } else {
+                ownerUser.password = await bcrypt.hash(password, 12);
+                ownerUser.emailVerified = true;
+                ownerUser.registrationEmailPending = false;
+                await ownerUser.save();
             }
 
             // If owner name was changed while adding another company with the same email,
