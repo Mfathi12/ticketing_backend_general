@@ -8,6 +8,7 @@ const Version = require('./version');
 const SubscriptionPlanContent = require('./subscriptionPlanContent');
 const PlanCatalogOverride = require('./planCatalogOverride');
 const ProjectPersonalNote = require('./projectPersonalNote');
+const { PersonalTask } = require('./personalTask');
 
 module.exports = {
     User,
@@ -20,5 +21,6 @@ module.exports = {
     Company,
     Version,
     SubscriptionPlanContent,
-    PlanCatalogOverride
+    PlanCatalogOverride,
+    PersonalTask
 };

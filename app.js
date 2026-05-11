@@ -12,6 +12,7 @@ const { startPostgresInit, isPostgresEnabled } = require('./db/postgres');
 const { isPostgresPrimary } = require('./services/sql/runtime');
 const authSql = require('./services/sql/authSql');
 
+
 // Prefer public DNS resolvers for Atlas SRV lookups on some Windows setups.
 
 
@@ -33,6 +34,7 @@ const subscriptionRoutes = require('./routes/subscriptionRoutes');
 const platformAdminRoutes = require('./routes/platformAdminRoutes');
 const versionRoutes = require('./routes/versionRoutes');
 const landingRoutes = require('./routes/landingRoutes');
+const personalTaskRoutes = require('./routes/personalTaskRoutes');
 const { languageMiddleware } = require('./middleware/language');
 const {
     sendEightHourCheckoutReminders,
@@ -123,7 +125,6 @@ io.use(async (socket, next) => {
         // Verify JWT token using the same logic as REST API
         const jwt = require('jsonwebtoken');
         const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
-
         let decoded;
         try {
             decoded = jwt.verify(token, JWT_SECRET);
@@ -679,6 +680,7 @@ app.use('/api/subscriptions', subscriptionRoutes);
 app.use('/api/platform-admin', platformAdminRoutes);
 app.use('/api/version', versionRoutes);
 app.use('/api/landing', landingRoutes);
+app.use('/api/users', personalTaskRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -802,7 +804,7 @@ db.once('open', async () => {
 });
 
 if (!process.env.VERCEL) {
-    server.listen(port, () => {
+    server.listen(port, '0.0.0.0', () => {
         console.log(`\n🚀 Server started on port: ${port}`);
         console.log(`📡 Socket.io server ready at http://localhost:${port}/socket.io/`);
         console.log(`🔗 Health check: http://localhost:${port}/health`);
