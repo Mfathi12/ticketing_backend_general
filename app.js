@@ -668,6 +668,7 @@ app.get('/api/test', (req, res) => {
 
 // Routes
 app.use('/api/auth', authRoutes);
+app.use('/api/users', personalTaskRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/tickets', ticketRoutes);
@@ -680,8 +681,6 @@ app.use('/api/subscriptions', subscriptionRoutes);
 app.use('/api/platform-admin', platformAdminRoutes);
 app.use('/api/version', versionRoutes);
 app.use('/api/landing', landingRoutes);
-app.use('/api/users', personalTaskRoutes);
-
 // Health check endpoint
 app.get('/health', (req, res) => {
     res.json({ message: 'ABSAI Ticket Management API is running!' });

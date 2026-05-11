@@ -1,6 +1,5 @@
 const express = require('express');
 const models = require('../models');
-console.log('Models keys:', Object.keys(models)); // temporary debug
 const { PersonalTask } = models;
 const { authenticateToken } = require('../middleware/auth');
 const { isPostgresPrimary } = require('../services/sql/runtime');
@@ -163,10 +162,10 @@ router.delete('/personal-tasks/:taskId', authenticateToken, async (req, res) => 
 
         if (isPostgresPrimary()) {
             const { PersonalTask: PT } = await waitForPostgres(); // fixed: was waitForPostgresModels
-            const deleted = await PT.destroy({
+            const deletedCount = await PT.destroy({
                 where: { id: taskId, userId: req.user.id || req.user._id }
             });
-            if (!deleted) return res.status(404).json({ message: 'Task not found' });
+            if (!deletedCount) return res.status(404).json({ message: 'Task not found' });
             return res.json({ message: 'Task deleted' });
         }
 
