@@ -33,6 +33,7 @@ const userToChatShape = (u) => {
     };
 };
 
+
 /** One-level reply snapshot (matches Mongoose .populate('replyTo') lean shape without deep chaining). */
 const mapReplyToSnapshot = async (msgRow, m) => {
     const msg = msgRow.get ? msgRow.get({ plain: true }) : msgRow;

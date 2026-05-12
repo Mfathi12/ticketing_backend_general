@@ -1,5 +1,6 @@
 const { DataTypes } = require('sequelize');
 const mongoose = require('mongoose');
+const { DEFAULT_SUBSCRIPTION_PLAN_ID } = require('../../../utils/subscriptionPlanIds');
 
 const newObjectIdString = () => new mongoose.Types.ObjectId().toString();
 
@@ -49,7 +50,11 @@ const defineModels = (sequelize) => {
                 defaultValue: 'active'
             },
             deletedAt: { type: DataTypes.DATE, defaultValue: null },
-            subscriptionPlanId: { type: DataTypes.STRING, allowNull: false, defaultValue: 'free' },
+            subscriptionPlanId: {
+                type: DataTypes.STRING,
+                allowNull: false,
+                defaultValue: DEFAULT_SUBSCRIPTION_PLAN_ID
+            },
             subscriptionStatus: {
                 type: DataTypes.ENUM('active', 'pending', 'expired', 'cancelled'),
                 allowNull: false,
@@ -439,6 +444,27 @@ const defineModels = (sequelize) => {
         }
     );
 
+    const PersonalTask = sequelize.define(
+        'PersonalTask',
+        {
+            id: { type: DataTypes.STRING(24), primaryKey: true, defaultValue: newObjectIdString },
+            userId: { type: DataTypes.STRING(24), allowNull: false },
+            title: { type: DataTypes.STRING(500), allowNull: false },
+            estimatedMinutes: { type: DataTypes.INTEGER, allowNull: false },
+            column: {
+                type: DataTypes.ENUM('backlog', 'this_week', 'today', 'done'),
+                allowNull: false,
+                defaultValue: 'backlog'
+            },
+            completedAt: { type: DataTypes.DATE, defaultValue: null }
+        },
+        {
+            tableName: 'personal_tasks',
+            timestamps: true,
+            indexes: [{ fields: ['userId', 'column'] }]
+        }
+    );
+
     const models = {
         User,
         Company,
@@ -464,7 +490,8 @@ const defineModels = (sequelize) => {
         Version,
         SubscriptionPlanContent,
         PlanCatalogOverride,
-        ProjectPersonalNote
+        ProjectPersonalNote,
+        PersonalTask
     };
 
     Company.belongsTo(User, { as: 'ownerUser', foreignKey: { name: 'ownerUserId', allowNull: false }, onDelete: 'RESTRICT' });
@@ -569,6 +596,9 @@ const defineModels = (sequelize) => {
 
     ProjectPersonalNote.belongsTo(Project, { foreignKey: { name: 'projectId', allowNull: false }, onDelete: 'CASCADE' });
     ProjectPersonalNote.belongsTo(User, { foreignKey: { name: 'userId', allowNull: false }, onDelete: 'CASCADE' });
+
+    PersonalTask.belongsTo(User, { foreignKey: { name: 'userId', allowNull: false }, onDelete: 'CASCADE' });
+    User.hasMany(PersonalTask, { as: 'personalTasks', foreignKey: 'userId' });
 
     return models;
 };

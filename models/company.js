@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { DEFAULT_SUBSCRIPTION_PLAN_ID } = require('../utils/subscriptionPlanIds');
 
 const companySchema = new mongoose.Schema({
     name: {
@@ -46,7 +47,7 @@ const companySchema = new mongoose.Schema({
     subscription: {
         planId: {
             type: String,
-            default: 'free'
+            default: DEFAULT_SUBSCRIPTION_PLAN_ID
         },
         status: {
             type: String,

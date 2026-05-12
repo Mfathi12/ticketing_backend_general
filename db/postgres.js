@@ -1,5 +1,6 @@
 const { Sequelize } = require('sequelize');
 const { defineModels } = require('./sequelize/models');
+const { ensurePersonalTasksTable } = require('../services/sql/personalTasksTable');
 
 let sequelize = null;
 let sequelizeModels = null;
@@ -60,6 +61,9 @@ const initPostgres = async () => {
     await sequelize.authenticate();
     sequelizeModels = defineModels(sequelize);
     await runSyncIfConfigured(sequelize);
+    await ensurePersonalTasksTable(sequelize).catch((err) => {
+        console.error('PostgreSQL: ensure personal_tasks table failed:', err.message);
+    });
     return { enabled: true, sequelize, models: sequelizeModels };
 };
 

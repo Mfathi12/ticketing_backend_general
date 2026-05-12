@@ -3,6 +3,7 @@ const Attendance = require('../models/attendance');
 const { isPostgresPrimary } = require('./sql/runtime');
 const attendanceSql = require('./sql/attendanceSql');
 
+
 function normalizeMonthYear(month, year) {
     const mi = parseInt(month, 10);
     const yi = parseInt(year, 10);

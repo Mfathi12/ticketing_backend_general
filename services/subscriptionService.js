@@ -3,6 +3,12 @@ const { Op } = require('sequelize');
 const { SubscriptionPlanContent, PlanCatalogOverride } = require('../models');
 const { getSequelizeModels, isPostgresEnabled, startPostgresInit } = require('../db/postgres');
 const { localizePlan, normalizeLang } = require('../utils/i18n');
+const {
+    PLAN_IDS,
+    DEFAULT_SUBSCRIPTION_PLAN_ID,
+    normalizeSubscriptionPlanId,
+    getSubscriptionPlanRank
+} = require('../utils/subscriptionPlanIds');
 const hasArabicChars = (value) => /[\u0600-\u06FF]/.test(String(value || ''));
 
 /** Plan translation + catalog override rows live in Postgres when enabled and models are ready. */
@@ -14,8 +20,6 @@ const useSqlPlanTables = () => {
 
 /** Avoid Mongoose plan queries when Mongo is not connected (e.g. `bufferCommands = false` with no URI). */
 const mongoosePlansReady = () => mongoose.connection.readyState === 1;
-
-const PLAN_IDS = ['free', 'basic', 'pro', 'enterprise'];
 
 const SUBSCRIPTION_PLANS = [
     {
@@ -99,7 +103,10 @@ const SUBSCRIPTION_PLANS = [
         id: 'enterprise',
         name: 'Enterprise',
         description: 'For organizations with 30+ members',
-        price: Number(process.env.PAYMOB_ENTERPRISE_PRICE || 400),
+        price: (() => {
+            const n = Number(process.env.PAYMOB_ENTERPRISE_PRICE);
+            return Number.isFinite(n) && n >= 0.01 ? n : 400;
+        })(),
         currency: 'EGP',
         billingPeriod: 'monthly',
         features: [
@@ -127,11 +134,45 @@ const GRACE_PERIOD_DAYS = 7;
 
 const cloneJson = (obj) => JSON.parse(JSON.stringify(obj));
 
+/** Paid tiers must charge at least 0.01 major units for Paymob (amount ≥ 1 minor unit). */
+const MIN_CHECKOUT_UNIT_PRICE = 0.01;
+
+/**
+ * Parses catalog/admin price: strips thousand separators (e.g. "2,000") so saving does not become NaN → 0.
+ */
+const parseCatalogUnitPrice = (val) => {
+    if (val == null || val === '') return NaN;
+    const s = String(val)
+        .replace(/,/g, '')
+        .replace(/\u066C/g, '')
+        .trim();
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : NaN;
+};
+
+/**
+ * Final unit price (EGP etc.) for Paymob: uses merged catalog price, falls back to static defaults, never invalid/zero for paid.
+ */
+const resolveCheckoutUnitPrice = (plan) => {
+    const id = normalizeSubscriptionPlanId(plan?.id);
+    const fallback = SUBSCRIPTION_PLANS.find((p) => p.id === id);
+    let n = parseCatalogUnitPrice(plan?.price);
+    if (!Number.isFinite(n) || n < MIN_CHECKOUT_UNIT_PRICE) {
+        n = parseCatalogUnitPrice(fallback?.price);
+    }
+    if (!Number.isFinite(n) || n < MIN_CHECKOUT_UNIT_PRICE) {
+        if (id === 'free') return 0;
+        return MIN_CHECKOUT_UNIT_PRICE;
+    }
+    return n;
+};
+
 const mergePlanWithOverride = (basePlan, overrideDoc) => {
     const merged = cloneJson(basePlan);
     if (!overrideDoc) return merged;
     const ov = overrideDoc.toObject ? overrideDoc.toObject() : { ...overrideDoc };
-    const skip = new Set(['_id', '__v', 'planId', 'createdAt', 'updatedAt']);
+    // Never copy DB primary key onto catalog objects — Sequelize raw rows use `id` for row PK and would overwrite plan slug (basic/pro/…).
+    const skip = new Set(['_id', '__v', 'id', 'planId', 'createdAt', 'updatedAt']);
     Object.keys(ov).forEach((key) => {
         if (skip.has(key)) return;
         const val = ov[key];
@@ -142,6 +183,12 @@ const mergePlanWithOverride = (basePlan, overrideDoc) => {
                 const lv = val[lk];
                 if (lv !== undefined) merged.limits[lk] = lv;
             });
+        } else if (key === 'price' && merged.id !== 'free') {
+            const n = parseCatalogUnitPrice(val);
+            if (!Number.isFinite(n) || n <= 0) {
+                return;
+            }
+            merged[key] = n;
         } else {
             merged[key] = val;
         }
@@ -183,14 +230,13 @@ const refreshPlanCatalogCache = async () => {
 };
 
 const getPlanById = (planId) => {
-    const id = String(planId || 'free').toLowerCase();
+    const id = normalizeSubscriptionPlanId(planId);
     const list = getPlansSourceList();
     return list.find((plan) => plan.id === id) || list[0];
 };
 
 const getCompanyPlan = (company) => {
-    const planId = company?.subscription?.planId || 'free';
-    return getPlanById(planId);
+    return getPlanById(company?.subscription?.planId);
 };
 
 const serializePlans = () =>
@@ -522,6 +568,8 @@ const evaluateAndSyncCompanySubscriptionCore = async (company, now = new Date())
         company.subscription = {};
     }
 
+    company.subscription.planId = normalizeSubscriptionPlanId(company.subscription.planId);
+
     const currentPlanId = company.subscription.planId || 'free';
     if (company.subscription.status === 'pending') {
         return {
@@ -687,7 +735,10 @@ const evaluateAndSyncCompanySubscription = async (company, now = new Date()) => 
 module.exports = {
     SUBSCRIPTION_PLANS,
     PLAN_IDS,
+    DEFAULT_SUBSCRIPTION_PLAN_ID,
     GRACE_PERIOD_DAYS,
+    normalizeSubscriptionPlanId,
+    getSubscriptionPlanRank,
     getPlanById,
     getCompanyPlan,
     serializePlans,
@@ -700,5 +751,8 @@ module.exports = {
     invalidateCompanySubscriptionEvalCache,
     refreshPlanCatalogCache,
     mergePlanWithOverride,
-    getPlansSourceList
+    getPlansSourceList,
+    resolveCheckoutUnitPrice,
+    parseCatalogUnitPrice,
+    MIN_CHECKOUT_UNIT_PRICE
 };

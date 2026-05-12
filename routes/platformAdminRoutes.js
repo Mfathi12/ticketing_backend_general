@@ -10,7 +10,8 @@ const {
     PLAN_IDS,
     SUBSCRIPTION_PLANS,
     refreshPlanCatalogCache,
-    getPlansSourceList
+    getPlansSourceList,
+    parseCatalogUnitPrice
 } = require('../services/subscriptionService');
 const { isPostgresPrimary } = require('../services/sql/runtime');
 const platformAdminSql = require('../services/sql/platformAdminSql');
@@ -896,6 +897,14 @@ router.put('/plan-catalog/:planId', async (req, res) => {
                 set[k] = body[k];
             }
         });
+        if (Object.prototype.hasOwnProperty.call(set, 'price')) {
+            const p = parseCatalogUnitPrice(set.price);
+            if (!Number.isFinite(p) || p < 0) {
+                delete set.price;
+            } else {
+                set.price = p;
+            }
+        }
         if (isPostgresPrimary()) {
             await platformAdminSql.planCatalogUpsert(planId, set);
             await refreshPlanCatalogCache();

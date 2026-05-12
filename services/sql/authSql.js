@@ -3,6 +3,7 @@ const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
 const { getSequelizeModels, getSequelize } = require('../../db/postgres');
 const { subscriptionFromRow, wrapCompanyForSubscription } = require('./companySubscriptionWrap');
+const { DEFAULT_SUBSCRIPTION_PLAN_ID } = require('../../utils/subscriptionPlanIds');
 
 const requireModels = () => {
     const m = getSequelizeModels();
@@ -188,7 +189,8 @@ const registerCompany = async ({
     trimmedOwnerName,
     normalizedEmail,
     password,
-    existingOwnerUser
+    existingOwnerUser,
+    setMissingPasswordPlain
 }) => {
     const { User, Company, UserCompany, CompanyMember } = requireModels();
     const sql = getSequelize();
@@ -198,6 +200,17 @@ const registerCompany = async ({
 
         if (existingOwnerUser) {
             ownerId = String(existingOwnerUser._id);
+            if (setMissingPasswordPlain) {
+                const hashedPassword = await bcrypt.hash(String(setMissingPasswordPlain), 12);
+                await User.update(
+                    {
+                        password: hashedPassword,
+                        emailVerified: true,
+                        registrationEmailPending: false
+                    },
+                    { where: { id: ownerId }, transaction: t }
+                );
+            }
             const normalizedOwnerName = String(trimmedOwnerName || '').trim();
             const currentName = String(existingOwnerUser.name || '').trim();
             if (normalizedOwnerName && normalizedOwnerName !== currentName) {
@@ -245,7 +258,7 @@ const registerCompany = async ({
                 name: trimmedCompanyName,
                 email: normalizedEmail,
                 ownerUserId: ownerId,
-                subscriptionPlanId: 'free',
+                subscriptionPlanId: DEFAULT_SUBSCRIPTION_PLAN_ID,
                 subscriptionStatus: 'active',
                 subscriptionIsTrial: false,
                 subscriptionTrialEndsAt: null,
