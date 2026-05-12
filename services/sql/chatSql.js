@@ -345,18 +345,16 @@ const listUsersForChat = async (companyId, excludeUserId) => {
     const m = requireModels();
     const ucs = await m.UserCompany.findAll({
         where: { companyId: String(companyId) },
-        include: [
-            {
-                model: m.User,
-                required: true,
-                attributes: ['id', 'name', 'email', 'title', 'role']
-            }
-        ]
+        attributes: ['userId']
     });
-    const users = ucs
-        .map((uc) => uc.User)
-        .filter(Boolean)
-        .filter((u) => String(u.id) !== String(excludeUserId));
+    const userIds = [...new Set(ucs.map((uc) => uc.userId).filter(Boolean))];
+    const filteredIds = userIds.filter((id) => String(id) !== String(excludeUserId));
+    const users = filteredIds.length
+        ? await m.User.findAll({
+              where: { id: filteredIds },
+              attributes: ['id', 'name', 'email', 'title', 'role']
+          })
+        : [];
     const withMembership = await Promise.all(
         users.map(async (u) => {
             const lean = await authSql.findUserById(u.id);
