@@ -1,6 +1,7 @@
 const { Sequelize } = require('sequelize');
 const { defineModels } = require('./sequelize/models');
 const { ensurePersonalTasksTable } = require('../services/sql/personalTasksTable');
+const { ensurePostgresRoleColumnsCompat } = require('../services/sql/ensurePostgresRoleColumnsCompat');
 
 let sequelize = null;
 let sequelizeModels = null;
@@ -61,6 +62,9 @@ const initPostgres = async () => {
     await sequelize.authenticate();
     sequelizeModels = defineModels(sequelize);
     await runSyncIfConfigured(sequelize);
+    await ensurePostgresRoleColumnsCompat(sequelize).catch((err) => {
+        console.error('PostgreSQL: ensurePostgresRoleColumnsCompat failed:', err.message);
+    });
     await ensurePersonalTasksTable(sequelize).catch((err) => {
         console.error('PostgreSQL: ensure personal_tasks table failed:', err.message);
     });

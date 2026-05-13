@@ -551,12 +551,12 @@ router.get('/users', async (req, res) => {
         }
         if (companyId && mongoose.Types.ObjectId.isValid(companyId)) {
             const oid = new mongoose.Types.ObjectId(companyId);
-            if (['owner', 'admin', 'manager', 'developer', 'tester', 'user'].includes(role)) {
+            if (['owner', 'admin', 'manager', 'user'].includes(role)) {
                 match.companies = { $elemMatch: { company: oid, companyRole: role } };
             } else {
                 match['companies.company'] = oid;
             }
-        } else if (['owner', 'admin', 'manager', 'developer', 'tester', 'user'].includes(role)) {
+        } else if (['owner', 'admin', 'manager', 'user'].includes(role)) {
             match['companies.companyRole'] = role;
         }
         if (accountStatus === 'banned') match.accountStatus = 'banned';

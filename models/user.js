@@ -38,9 +38,9 @@ const userSchema = new mongoose.Schema({
         validate: {
             validator(value) {
                 if (!value) return true;
-                return String(value).length >= 6;
+                return String(value).length >= 8;
             },
-            message: 'Password must be at least 6 characters'
+            message: 'Password must be at least 8 characters'
         }
     },
     role: {
@@ -49,7 +49,7 @@ const userSchema = new mongoose.Schema({
          * `super_admin` = platform staff (admin dashboard only). Per-company power uses `companies[].companyRole`.
          * `admin` kept for legacy data; new company owners get `user`.
          */
-        enum: ['super_admin', 'admin', 'manager', 'developer', 'tester', 'user'],
+        enum: ['super_admin', 'owner', 'admin', 'manager', 'user'],
         default: 'user'
     },
     accountStatus: {
@@ -73,7 +73,7 @@ const userSchema = new mongoose.Schema({
         },
         companyRole: {
             type: String,
-            enum: ['owner', 'admin', 'manager', 'developer', 'tester', 'user'],
+            enum: ['owner', 'admin', 'manager', 'user'],
             default: 'user'
         },
         isOwner: {

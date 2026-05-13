@@ -28,6 +28,7 @@ const OTP_PURPOSE_FP = 'forgot_password';
 const MAX_REFRESH_AFTER_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 
 const REGISTRATION_OTP_TTL_MS = 10 * 60 * 1000;
+const STRONG_PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[^A-Za-z0-9]).{8,}$/;
 
 // Generate OTP
 const generateOTP = () => {
@@ -314,8 +315,10 @@ router.post('/register-company', async (req, res) => {
             });
         }
 
-        if (password.length < 8) {
-            return res.status(400).json({ message: 'Password must be at least 8 characters' });
+        if (!STRONG_PASSWORD_REGEX.test(String(password))) {
+            return res.status(400).json({
+                message: 'Password must be at least 8 characters and include uppercase, lowercase, and a special character'
+            });
         }
 
         const normalizedEmail = email.toLowerCase().trim();
@@ -528,10 +531,14 @@ router.post('/register-company', async (req, res) => {
                 title: 'Owner',
                 email: normalizedEmail,
                 password: hashedPassword,
-                role: 'user',
+                role: 'owner',
                 emailVerified: false,
                 registrationEmailPending: true
             });
+        }
+        if (ownerUser.role !== 'owner') {
+            ownerUser.role = 'owner';
+            await ownerUser.save();
         }
 
         const existingCompanyWithSameName = await Company.findOne({
@@ -817,8 +824,10 @@ router.post('/platform-admin/create', async (req, res) => {
         if (!email || !password) {
             return res.status(400).json({ message: 'email and password are required' });
         }
-        if (String(password).length < 6) {
-            return res.status(400).json({ message: 'Password must be at least 6 characters' });
+        if (!STRONG_PASSWORD_REGEX.test(String(password))) {
+            return res.status(400).json({
+                message: 'Password must be at least 8 characters and include uppercase, lowercase, and a special character'
+            });
         }
 
         const normalizedEmail = String(email).toLowerCase().trim();
@@ -1072,6 +1081,11 @@ router.post('/verify-otp', async (req, res) => {
 
         if (!email || !otp || !newPassword) {
             return res.status(400).json({ message: 'Email, OTP, and new password are required' });
+        }
+        if (!STRONG_PASSWORD_REGEX.test(String(newPassword))) {
+            return res.status(400).json({
+                message: 'Password must be at least 8 characters and include uppercase, lowercase, and a special character'
+            });
         }
 
         const normalizedEmail = String(email).toLowerCase().trim();

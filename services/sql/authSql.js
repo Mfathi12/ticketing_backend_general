@@ -220,6 +220,7 @@ const registerCompany = async ({
                     { where: { userId: ownerId, isOwner: true }, transaction: t }
                 );
             }
+            await User.update({ role: 'owner' }, { where: { id: ownerId }, transaction: t });
         } else {
             const hashedPassword = await bcrypt.hash(password, 12);
             const ownerRow = await User.create(
@@ -229,7 +230,7 @@ const registerCompany = async ({
                     title: 'Owner',
                     email: normalizedEmail,
                     password: hashedPassword,
-                    role: 'user',
+                    role: 'owner',
                     emailVerified: false,
                     registrationEmailPending: true
                 },

@@ -69,6 +69,7 @@ const addAccountSql = async ({
         });
 
         if (!target) {
+            const membershipIsOwner = String(companyRole).toLowerCase() === 'owner';
             target = await m.User.create(
                 {
                     id: newObjectIdString(),
@@ -92,7 +93,7 @@ const addAccountSql = async ({
                     companyId: String(companyId),
                     displayName: String(name).trim(),
                     companyRole,
-                    isOwner: false
+                    isOwner: membershipIsOwner
                 },
                 { transaction: t }
             );
@@ -107,6 +108,7 @@ const addAccountSql = async ({
                 err.code = 'already_member';
                 throw err;
             }
+            const membershipIsOwnerExisting = String(companyRole).toLowerCase() === 'owner';
             await m.UserCompany.create(
                 {
                     id: newObjectIdString(),
@@ -114,7 +116,7 @@ const addAccountSql = async ({
                     companyId: String(companyId),
                     displayName: String(name).trim(),
                     companyRole,
-                    isOwner: false
+                    isOwner: membershipIsOwnerExisting
                 },
                 { transaction: t }
             );
@@ -141,13 +143,14 @@ const addAccountSql = async ({
             transaction: t
         });
         if (!userExistsInCompany) {
+            const membershipIsOwnerMember = String(companyRole).toLowerCase() === 'owner';
             await m.CompanyMember.create(
                 {
                     id: newObjectIdString(),
                     companyId: String(companyId),
                     userId: targetId,
                     role: companyRole,
-                    isOwner: false
+                    isOwner: membershipIsOwnerMember
                 },
                 { transaction: t }
             );
@@ -190,7 +193,8 @@ const updateUserSql = async ({
     activeCompanyId,
     updateData,
     role,
-    canManageCompanyUser
+    canManageCompanyUser,
+    displayName
 }) => {
     const m = requireModels();
     const uid = String(userId);
@@ -198,12 +202,20 @@ const updateUserSql = async ({
         await m.User.update(updateData, { where: { id: uid } });
     }
     if (role && activeCompanyId && canManageCompanyUser) {
+        const isOwnerRole = String(role).toLowerCase() === 'owner';
         await m.UserCompany.update(
-            { companyRole: role },
+            { companyRole: role, isOwner: isOwnerRole },
             { where: { userId: uid, companyId: String(activeCompanyId) } }
         );
         await m.CompanyMember.update(
-            { role },
+            { role, isOwner: isOwnerRole },
+            { where: { userId: uid, companyId: String(activeCompanyId) } }
+        );
+        await m.User.update({ role }, { where: { id: uid } });
+    }
+    if (displayName && activeCompanyId) {
+        await m.UserCompany.update(
+            { displayName: String(displayName).trim() },
             { where: { userId: uid, companyId: String(activeCompanyId) } }
         );
     }

@@ -26,7 +26,7 @@ const companySchema = new mongoose.Schema({
         },
         role: {
             type: String,
-            enum: ['owner', 'admin', 'manager', 'developer', 'tester', 'user'],
+            enum: ['owner', 'admin', 'manager', 'user'],
             default: 'user'
         },
         isOwner: {

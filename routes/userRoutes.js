@@ -56,7 +56,15 @@ const normalizeInviteToken = (token) =>
 
 const hashInviteToken = (token) =>
     crypto.createHash('sha256').update(normalizeInviteToken(token)).digest('hex');
-const COMPANY_ROLES = ['owner', 'admin', 'manager', 'developer', 'tester', 'user'];
+/** Invited / updated membership roles (includes co-owner). */
+const ASSIGNABLE_COMPANY_ROLES = ['owner', 'admin', 'manager', 'user'];
+const STRONG_PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[^A-Za-z0-9]).{8,}$/;
+const MIN_TITLE_LENGTH = 2;
+const hasAtLeastTwoWords = (value) =>
+    String(value || '')
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean).length >= 2;
 const canManageActiveCompanyUsers = (req) => {
     const m = req.companyMembership;
     return Boolean(m && (m.isOwner || ['admin', 'manager'].includes(m.companyRole)));
@@ -75,7 +83,7 @@ const resolveMembershipDisplayName = (userDoc, companyId, fallbackCompanyName = 
 // 3. Add user to company — active company from JWT; owner / company admin / manager may invite
 router.post('/add-account', authenticateToken, async (req, res) => {
     try {
-        const { name, title, email, role } = req.body;
+        const { name, title, email, role: roleBody } = req.body;
 
         if (!req.companyId) {
             return res.status(400).json({
@@ -88,8 +96,16 @@ router.post('/add-account', authenticateToken, async (req, res) => {
         if (!name || !title || !email) {
             return res.status(400).json({ message: 'name, title and email are required' });
         }
+        if (!hasAtLeastTwoWords(name)) {
+            return res.status(400).json({ message: 'Name must contain at least two words' });
+        }
+        if (String(title).trim().length < MIN_TITLE_LENGTH) {
+            return res.status(400).json({ message: 'Title must be at least 2 characters' });
+        }
 
         const m = req.companyMembership;
+        const invokerIsCompanyOwner =
+            Boolean(m?.isOwner) || String(m?.companyRole || '').toLowerCase() === 'owner';
         const canInvite =
             m &&
             (Boolean(m.isOwner) || ['admin', 'manager'].includes(m.companyRole));
@@ -100,9 +116,16 @@ router.post('/add-account', authenticateToken, async (req, res) => {
         }
 
         const normalizedEmail = email.toLowerCase().trim();
-        const companyRole = role || 'user';
-        if (!COMPANY_ROLES.includes(companyRole)) {
-            return res.status(400).json({ message: `Invalid role. Allowed roles: ${COMPANY_ROLES.join(', ')}` });
+        let companyRole = invokerIsCompanyOwner ? 'owner' : 'user';
+        if (roleBody != null && String(roleBody).trim() !== '') {
+            const r = String(roleBody).trim().toLowerCase();
+            if (!ASSIGNABLE_COMPANY_ROLES.includes(r)) {
+                return res.status(400).json({ message: 'Invalid role' });
+            }
+            if (r === 'owner' && !invokerIsCompanyOwner) {
+                return res.status(403).json({ message: 'Only a company owner can assign the owner role' });
+            }
+            companyRole = r;
         }
         const inviteToken = createInviteToken();
         const inviteTokenHash = hashInviteToken(inviteToken);
@@ -164,6 +187,8 @@ router.post('/add-account', authenticateToken, async (req, res) => {
                 });
             }
 
+            const membershipIsOwner = String(companyRole).toLowerCase() === 'owner';
+
             targetUser = await User.findOne({ email: normalizedEmail });
             if (!targetUser) {
                 targetUser = await User.create({
@@ -177,7 +202,7 @@ router.post('/add-account', authenticateToken, async (req, res) => {
                         company: companyId,
                         displayName: String(name).trim(),
                         companyRole,
-                        isOwner: false
+                        isOwner: membershipIsOwner
                     }],
                     invite: {
                         tokenHash: inviteTokenHash,
@@ -198,7 +223,7 @@ router.post('/add-account', authenticateToken, async (req, res) => {
                     company: companyId,
                     displayName: String(name).trim(),
                     companyRole,
-                    isOwner: false
+                    isOwner: membershipIsOwner
                 });
                 if (!targetUser.password) {
                     targetUser.invite = {
@@ -219,7 +244,7 @@ router.post('/add-account', authenticateToken, async (req, res) => {
                 company.members.push({
                     user: targetUser._id,
                     role: companyRole,
-                    isOwner: false
+                    isOwner: membershipIsOwner
                 });
                 await company.save();
             }
@@ -286,6 +311,10 @@ router.delete('/delete-account/:userId', authenticateToken, async (req, res) => 
             return res.status(400).json({ message: 'Cannot remove your own account from this company' });
         }
 
+        const invokerIsCompanyOwner =
+            Boolean(req.companyMembership?.isOwner) ||
+            String(req.companyMembership?.companyRole || '').toLowerCase() === 'owner';
+
         if (isPostgresPrimary()) {
             const company = await loadCompanyWithMembers(companyId);
             if (!company) {
@@ -301,7 +330,9 @@ router.delete('/delete-account/:userId', authenticateToken, async (req, res) => 
             if (!userMembership) {
                 return res.status(400).json({ message: 'User is not a member of the active company' });
             }
-            if (userMembership.isOwner || userMembership.companyRole === 'owner') {
+            const targetIsOwner =
+                Boolean(userMembership.isOwner) || String(userMembership.companyRole || '').toLowerCase() === 'owner';
+            if (targetIsOwner && !invokerIsCompanyOwner) {
                 return res.status(400).json({ message: 'Company owner cannot be removed' });
             }
             await userCompanySql.deleteAccountSql({ companyId, userId });
@@ -324,7 +355,9 @@ router.delete('/delete-account/:userId', authenticateToken, async (req, res) => 
         if (!userMembership) {
             return res.status(400).json({ message: 'User is not a member of the active company' });
         }
-        if (userMembership.isOwner || userMembership.companyRole === 'owner') {
+        const targetIsOwnerMongo =
+            Boolean(userMembership.isOwner) || String(userMembership.companyRole || '').toLowerCase() === 'owner';
+        if (targetIsOwnerMongo && !invokerIsCompanyOwner) {
             return res.status(400).json({ message: 'Company owner cannot be removed' });
         }
 
@@ -381,15 +414,22 @@ router.put('/update-user/:userId', authenticateToken, async (req, res) => {
             if (!targetMembership) {
                 return res.status(403).json({ message: 'You can only update users in your active company' });
             }
-            if (targetMembership.isOwner || targetMembership.companyRole === 'owner') {
-                return res.status(400).json({ message: 'Company owner cannot be edited from this action' });
-            }
         }
 
         // Build update object
         const updateData = {};
-        if (name) updateData.name = name;
-        if (title) updateData.title = title;
+        if (name != null) {
+            if (!hasAtLeastTwoWords(name)) {
+                return res.status(400).json({ message: 'Name must contain at least two words' });
+            }
+            updateData.name = String(name).trim();
+        }
+        if (title != null) {
+            if (String(title).trim().length < MIN_TITLE_LENGTH) {
+                return res.status(400).json({ message: 'Title must be at least 2 characters' });
+            }
+            updateData.title = String(title).trim();
+        }
         if (email) {
             const normalized = email.toLowerCase();
             if (isPostgresPrimary()) {
@@ -412,23 +452,27 @@ router.put('/update-user/:userId', authenticateToken, async (req, res) => {
             updateData.email = normalized;
         }
 
-        // Role update is company-scoped (membership role in active company)
-        if (role) {
-            if (!canManageCompanyUser || !activeCompanyId) {
-                return res.status(403).json({ message: 'Only company owner, admin or manager can change user roles' });
+        let roleToApply = null;
+        if (role !== undefined && role !== null && String(role).trim() !== '') {
+            if (!canManageCompanyUser) {
+                return res.status(403).json({
+                    message: 'Only company owner, admin or manager can change user roles'
+                });
             }
-            if (!COMPANY_ROLES.includes(role)) {
-                return res.status(400).json({ message: `Invalid role. Allowed roles: ${COMPANY_ROLES.join(', ')}` });
+            if (isOwnAccount) {
+                return res.status(403).json({ message: 'You cannot change your own role' });
             }
-            const membershipIndex = (user.companies || []).findIndex(
-                (entry) => membershipCompanyId(entry) === activeCompanyId
-            );
-            if (membershipIndex === -1) {
-                return res.status(400).json({ message: 'User is not a member of active company' });
+            const r = String(role).trim().toLowerCase();
+            if (!ASSIGNABLE_COMPANY_ROLES.includes(r)) {
+                return res.status(400).json({ message: 'Invalid role' });
             }
-            if (!isPostgresPrimary()) {
-                user.companies[membershipIndex].companyRole = role;
+            const invokerIsCompanyOwner =
+                Boolean(req.companyMembership?.isOwner) ||
+                String(req.companyMembership?.companyRole || '').toLowerCase() === 'owner';
+            if (r === 'owner' && !invokerIsCompanyOwner) {
+                return res.status(403).json({ message: 'Only a company owner can assign the owner role' });
             }
+            roleToApply = r;
         }
 
         if (isPostgresPrimary()) {
@@ -436,8 +480,9 @@ router.put('/update-user/:userId', authenticateToken, async (req, res) => {
                 userId,
                 activeCompanyId,
                 updateData,
-                role: role || null,
-                canManageCompanyUser
+                role: roleToApply,
+                canManageCompanyUser,
+                displayName: updateData.name || null
             });
             const updatedUser = await authSql.findUserById(userId);
             return res.json({
@@ -450,20 +495,30 @@ router.put('/update-user/:userId', authenticateToken, async (req, res) => {
         if (Object.keys(updateData).length) {
             Object.assign(userDoc, updateData);
         }
-        if (role && activeCompanyId) {
+        if (updateData.name && activeCompanyId) {
             const membershipIndex = (userDoc.companies || []).findIndex(
                 (entry) => membershipCompanyId(entry) === activeCompanyId
             );
             if (membershipIndex !== -1) {
-                userDoc.companies[membershipIndex].companyRole = role;
+                userDoc.companies[membershipIndex].displayName = updateData.name;
             }
+        }
+        if (roleToApply && activeCompanyId) {
+            const membershipIndex = (userDoc.companies || []).findIndex(
+                (entry) => membershipCompanyId(entry) === activeCompanyId
+            );
+            if (membershipIndex !== -1) {
+                userDoc.companies[membershipIndex].companyRole = roleToApply;
+                userDoc.companies[membershipIndex].isOwner = roleToApply === 'owner';
+            }
+            userDoc.role = roleToApply;
         }
         await userDoc.save();
 
-        if (role && activeCompanyId) {
+        if (roleToApply && activeCompanyId) {
             await Company.updateOne(
                 { _id: activeCompanyId, 'members.user': userDoc._id },
-                { $set: { 'members.$.role': role } }
+                { $set: { 'members.$.role': roleToApply, 'members.$.isOwner': roleToApply === 'owner' } }
             );
         }
 
@@ -474,7 +529,7 @@ router.put('/update-user/:userId', authenticateToken, async (req, res) => {
             user: updatedUser
         });
     } catch (error) {
-        console.error('Update user error:', error);
+        console.error('Update user error:', error?.parent || error);
         res.status(500).json({ message: 'Internal server error' });
     }
 });
@@ -487,8 +542,10 @@ router.put('/change-password', authenticateToken, async (req, res) => {
         if (!currentPassword || !newPassword) {
             return res.status(400).json({ message: 'Current password and new password are required' });
         }
-        if (String(newPassword).length < 6) {
-            return res.status(400).json({ message: 'New password must be at least 6 characters' });
+        if (!STRONG_PASSWORD_REGEX.test(String(newPassword))) {
+            return res.status(400).json({
+                message: 'New password must be at least 8 characters and include uppercase, lowercase, and a special character'
+            });
         }
 
         let user = null;
@@ -628,8 +685,10 @@ router.post('/accept-invite', async (req, res) => {
         if (!token || !password) {
             return res.status(400).json({ message: 'token and password are required' });
         }
-        if (String(password).length < 6) {
-            return res.status(400).json({ message: 'Password must be at least 6 characters' });
+        if (!STRONG_PASSWORD_REGEX.test(String(password))) {
+            return res.status(400).json({
+                message: 'Password must be at least 8 characters and include uppercase, lowercase, and a special character'
+            });
         }
 
         const tokenHash = hashInviteToken(token);
@@ -809,8 +868,18 @@ router.put('/update-profile', authenticateToken, async (req, res) => {
 
         // Build update object
         const updateData = {};
-        if (name) updateData.name = name;
-        if (title) updateData.title = title;
+        if (name != null) {
+            if (!hasAtLeastTwoWords(name)) {
+                return res.status(400).json({ message: 'Name must contain at least two words' });
+            }
+            updateData.name = String(name).trim();
+        }
+        if (title != null) {
+            if (String(title).trim().length < MIN_TITLE_LENGTH) {
+                return res.status(400).json({ message: 'Title must be at least 2 characters' });
+            }
+            updateData.title = String(title).trim();
+        }
         if (email) {
             const normalized = email.toLowerCase();
             if (isPostgresPrimary()) {

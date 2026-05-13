@@ -474,7 +474,7 @@ const listUsersAdmin = async ({
     let userIdsFilter = null;
     if (companyId && /^[a-f0-9]{24}$/i.test(companyId)) {
         const ucWhere = { companyId: String(companyId) };
-        if (['owner', 'admin', 'manager', 'developer', 'tester', 'user'].includes(role)) {
+        if (['owner', 'admin', 'manager', 'user'].includes(role)) {
             if (role === 'owner') {
                 ucWhere.isOwner = true;
             } else {
@@ -490,7 +490,7 @@ const listUsersAdmin = async ({
         if (!userIdsFilter.length) {
             return { items: [], page, limit, total: 0, totalPages: 1 };
         }
-    } else if (['owner', 'admin', 'manager', 'developer', 'tester', 'user'].includes(role)) {
+    } else if (['owner', 'admin', 'manager', 'user'].includes(role)) {
         const ucWhere = {};
         if (role === 'owner') ucWhere.isOwner = true;
         else ucWhere.companyRole = role;

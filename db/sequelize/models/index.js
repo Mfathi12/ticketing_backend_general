@@ -16,7 +16,7 @@ const defineModels = (sequelize) => {
             registrationEmailPending: { type: DataTypes.BOOLEAN },
             password: { type: DataTypes.STRING },
             role: {
-                type: DataTypes.ENUM('super_admin', 'admin', 'manager', 'developer', 'tester', 'user'),
+                type: DataTypes.STRING(32),
                 allowNull: false,
                 defaultValue: 'user'
             },
@@ -84,7 +84,8 @@ const defineModels = (sequelize) => {
             id: { type: DataTypes.STRING(24), primaryKey: true, defaultValue: newObjectIdString },
             displayName: { type: DataTypes.STRING },
             companyRole: {
-                type: DataTypes.ENUM('owner', 'admin', 'manager', 'developer', 'tester', 'user'),
+                // VARCHAR: avoids PostgreSQL ENUM drift (missing `owner` in older DBs → 500 on promote).
+                type: DataTypes.STRING(32),
                 allowNull: false,
                 defaultValue: 'user'
             },
@@ -102,7 +103,7 @@ const defineModels = (sequelize) => {
         {
             id: { type: DataTypes.STRING(24), primaryKey: true, defaultValue: newObjectIdString },
             role: {
-                type: DataTypes.ENUM('owner', 'admin', 'manager', 'developer', 'tester', 'user'),
+                type: DataTypes.STRING(32),
                 allowNull: false,
                 defaultValue: 'user'
             },
