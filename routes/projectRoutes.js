@@ -1,6 +1,6 @@
 const express = require('express');
 const { Project, User, Ticket, ProjectPersonalNote, Company } = require('../models');
-const { Conversation } = require('../models/chat');
+const { Conversation, Message } = require('../models/chat');
 const { authenticateToken, canBypassProjectAssignment } = require('../middleware/auth');
 const {
     getCompanyPlan,
@@ -64,6 +64,30 @@ router.post('/add-project', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: 'Project name, start date, and estimated end date are required' });
         }
 
+        const sd = new Date(start_date);
+        const ed = new Date(estimated_end_date);
+        const todayUtc = new Date();
+        todayUtc.setUTCHours(0, 0, 0, 0);
+        const sdUtc = new Date(sd);
+        sdUtc.setUTCHours(0, 0, 0, 0);
+        if (sdUtc < todayUtc) {
+            return res.status(400).json({ message: 'Start date cannot be in the past', code: 'START_DATE_IN_PAST' });
+        }
+        const edUtc = new Date(ed);
+        edUtc.setUTCHours(0, 0, 0, 0);
+        if (edUtc < todayUtc) {
+            return res.status(400).json({
+                message: 'Estimated end date cannot be in the past',
+                code: 'END_DATE_IN_PAST'
+            });
+        }
+        if (ed < sd) {
+            return res.status(400).json({
+                message: 'Estimated end date must be on or after the start date',
+                code: 'END_BEFORE_START'
+            });
+        }
+
         const company = isPostgresPrimary()
             ? await authSql.loadCompanyForSubscription(activeCompanyId)
             : await Company.findById(activeCompanyId);
@@ -76,11 +100,17 @@ router.post('/add-project', authenticateToken, async (req, res) => {
             : await Project.countDocuments({ company: activeCompanyId });
         if (!canCreateMoreProjects(company, projectCount)) {
             const activePlan = getCompanyPlan(company);
-            const maxProjects = activePlan.limits.maxProjects;
+            const rawMax = activePlan?.limits?.maxProjects;
+            const capNum = rawMax == null ? NaN : Number(rawMax);
+            const limitForClient = Number.isFinite(capNum) ? capNum : null;
             return res.status(403).json({
-                message: `Your ${activePlan.name} plan allows up to ${maxProjects} projects. Upgrade your subscription to add more.`,
-                planId: activePlan.id,
-                limit: maxProjects,
+                message:
+                    limitForClient != null
+                        ? `Your ${activePlan?.name || 'current'} plan allows up to ${limitForClient} projects. Upgrade your subscription to add more.`
+                        : 'Your subscription plan does not allow more projects. Upgrade your subscription to add more.',
+                code: 'PROJECT_PLAN_LIMIT',
+                planId: activePlan?.id,
+                limit: limitForClient,
                 current: projectCount
             });
         }
@@ -544,6 +574,62 @@ router.get('/:projectId', authenticateToken, async (req, res) => {
         });
     } catch (error) {
         console.error('Get project error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+// Delete entire project (company owner only)
+router.delete('/:projectId', authenticateToken, async (req, res) => {
+    try {
+        const { projectId } = req.params;
+        const activeCompanyId = req.companyId ? req.companyId.toString() : null;
+        const m = req.companyMembership;
+        const isCompanyOwner =
+            Boolean(m?.isOwner) || String(m?.companyRole || '').toLowerCase() === 'owner';
+        if (!isCompanyOwner) {
+            return res.status(403).json({ message: 'Only the company owner can delete a project' });
+        }
+        if (!activeCompanyId) {
+            return res.status(400).json({
+                message: 'Active company required. Log in with a company or switch company first.'
+            });
+        }
+
+        if (isPostgresPrimary()) {
+            const existing = await projectSql.getProjectByIdWithAssignees(projectId);
+            if (!existing) {
+                return res.status(404).json({ message: 'Project not found' });
+            }
+            if (String(existing.company) !== activeCompanyId) {
+                return res.status(403).json({ message: 'You can only delete projects in your active company' });
+            }
+            await projectSql.deleteProjectFull(activeCompanyId, projectId);
+            return res.json({ message: 'Project deleted successfully' });
+        }
+
+        const project = await Project.findById(projectId);
+        if (!project) {
+            return res.status(404).json({ message: 'Project not found' });
+        }
+        if (!project.company || project.company.toString() !== activeCompanyId) {
+            return res.status(403).json({ message: 'You can only delete projects in your active company' });
+        }
+
+        await Ticket.deleteMany({ company: activeCompanyId, project: projectId });
+        const convIds = await Conversation.find({
+            company: activeCompanyId,
+            project: projectId
+        }).distinct('_id');
+        if (convIds.length) {
+            await Message.deleteMany({ conversation: { $in: convIds } });
+        }
+        await Conversation.deleteMany({ company: activeCompanyId, project: projectId });
+        await ProjectPersonalNote.deleteMany({ project: projectId });
+        await Project.deleteOne({ _id: projectId });
+
+        res.json({ message: 'Project deleted successfully' });
+    } catch (error) {
+        console.error('Delete project error:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 });

@@ -30,6 +30,48 @@ const MAX_REFRESH_AFTER_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 const REGISTRATION_OTP_TTL_MS = 10 * 60 * 1000;
 const STRONG_PASSWORD_REGEX = /^(?=.*[a-z])(?=.*[A-Z])(?=.*[^A-Za-z0-9]).{8,}$/;
 
+const MIN_COMPANY_NAME_LEN = 2;
+const MIN_OWNER_NAME_WORDS = 2;
+const MIN_OWNER_NAME_WORD_LEN = 2;
+
+const validateRegisterCompanyNames = (trimmedCompanyName, trimmedOwnerName) => {
+    const company = String(trimmedCompanyName || '').trim();
+    if (company.length < MIN_COMPANY_NAME_LEN) {
+        return {
+            ok: false,
+            code: 'COMPANY_NAME_TOO_SHORT',
+            message: `Company name must be at least ${MIN_COMPANY_NAME_LEN} characters.`
+        };
+    }
+    const parts = String(trimmedOwnerName || '')
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+    if (parts.length < MIN_OWNER_NAME_WORDS) {
+        return {
+            ok: false,
+            code: 'OWNER_NAME_NOT_FULL',
+            message: `Owner name must include at least ${MIN_OWNER_NAME_WORDS} words (e.g. first and last name).`
+        };
+    }
+    if (parts.some((w) => w.length < MIN_OWNER_NAME_WORD_LEN)) {
+        return {
+            ok: false,
+            code: 'OWNER_NAME_WORD_TOO_SHORT',
+            message: `Each word in the owner name must be at least ${MIN_OWNER_NAME_WORD_LEN} characters.`
+        };
+    }
+    return { ok: true };
+};
+
+const respondAccountExistsUseLogin = (res, normalizedEmail) =>
+    res.status(409).json({
+        code: 'ACCOUNT_EXISTS_USE_LOGIN',
+        message:
+            'An account with this email already exists. Sign in to create another company or manage your workspaces.',
+        email: normalizedEmail
+    });
+
 // Generate OTP
 const generateOTP = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
@@ -116,7 +158,7 @@ const writeLoginSuccessResponse = async (res, user, { bodyCompanyId, fcmToken })
     const companies = companyIds.length
         ? isPostgresPrimary()
             ? await authSql.findCompaniesByIds(companyIds)
-            : await Company.find({ _id: { $in: companyIds } }).select('name email ownerUser')
+            : await Company.find({ _id: { $in: companyIds }, deletedAt: null }).select('name email ownerUser')
         : [];
 
     const companiesWithMembership = mapCompaniesWithMembership(user.companies || [], companies);
@@ -275,14 +317,22 @@ const normalizeCompanyId = (membership) => {
     return String(raw);
 };
 
+const companyRowId = (company) => {
+    if (!company) return '';
+    if (company._id != null) return String(company._id);
+    if (company.id != null) return String(company.id);
+    return '';
+};
+
 const mapCompaniesWithMembership = (memberships = [], companies = []) =>
     memberships.map((entry) => {
         const entryCompanyId = normalizeCompanyId(entry);
         const matchedCompany = companies.find(
-            (company) => entryCompanyId && company._id.toString() === entryCompanyId
+            (company) => entryCompanyId && companyRowId(company) === String(entryCompanyId)
         );
         return {
             companyId: entryCompanyId,
+            displayName: typeof entry?.displayName === 'string' ? entry.displayName.trim() : '',
             companyRole: entry.companyRole,
             isOwner: entry.isOwner,
             company: matchedCompany || null
@@ -315,6 +365,11 @@ router.post('/register-company', async (req, res) => {
             });
         }
 
+        const nameCheck = validateRegisterCompanyNames(trimmedCompanyName, trimmedOwnerName);
+        if (!nameCheck.ok) {
+            return res.status(400).json({ code: nameCheck.code, message: nameCheck.message });
+        }
+
         if (!STRONG_PASSWORD_REGEX.test(String(password))) {
             return res.status(400).json({
                 message: 'Password must be at least 8 characters and include uppercase, lowercase, and a special character'
@@ -339,17 +394,10 @@ router.post('/register-company', async (req, res) => {
                     typeof ownerUserSql.password === 'string' &&
                     String(ownerUserSql.password).trim().length > 0;
                 if (hasPassword) {
-                    const isPasswordValid = await bcrypt.compare(password, ownerUserSql.password);
-                    if (!isPasswordValid) {
-                        return res.status(401).json({
-                            message:
-                                'Invalid credentials for existing user. Use your current account password to add another company.'
-                        });
-                    }
-                } else {
-                    /** Invited / legacy account with no password: same signup form sets password + new company. */
-                    setMissingPasswordPlain = password;
+                    return respondAccountExistsUseLogin(res, normalizedEmail);
                 }
+                /** Invited / legacy account with no password: same signup form sets password + new company. */
+                setMissingPasswordPlain = password;
             }
 
             let ownerUser;
@@ -487,19 +535,12 @@ router.post('/register-company', async (req, res) => {
                 typeof ownerUser.password === 'string' &&
                 String(ownerUser.password).trim().length > 0;
             if (hasPassword) {
-                const isPasswordValid = await bcrypt.compare(password, ownerUser.password);
-                if (!isPasswordValid) {
-                    return res.status(401).json({
-                        message:
-                            'Invalid credentials for existing user. Use your current account password to add another company.'
-                    });
-                }
-            } else {
-                ownerUser.password = await bcrypt.hash(password, 12);
-                ownerUser.emailVerified = true;
-                ownerUser.registrationEmailPending = false;
-                await ownerUser.save();
+                return respondAccountExistsUseLogin(res, normalizedEmail);
             }
+            ownerUser.password = await bcrypt.hash(password, 12);
+            ownerUser.emailVerified = true;
+            ownerUser.registrationEmailPending = false;
+            await ownerUser.save();
 
             // If owner name was changed while adding another company with the same email,
             // keep the latest owner name in user profile and owner memberships.
@@ -907,8 +948,9 @@ router.post('/login', async (req, res) => {
 
         if (user.registrationEmailPending === true) {
             return res.status(403).json({
+                code: 'EMAIL_NOT_VERIFIED',
                 message:
-                    'Email not verified. Use the code we sent when you registered, or POST /api/auth/resend-registration-otp.',
+                    'Email not verified. Enter the verification code we sent when you registered, or tap “Resend code” after signing in.',
                 requiresEmailVerification: true
             });
         }
@@ -1016,6 +1058,18 @@ router.post('/switch-company', authenticateToken, async (req, res) => {
             return res.status(403).json({ message: 'You are not a member of this company' });
         }
 
+        const companyIds = (req.user.companies || [])
+            .map((entry) => normalizeCompanyId(entry))
+            .filter((id) => id && mongoose.Types.ObjectId.isValid(id));
+        const companies = companyIds.length
+            ? isPostgresPrimary()
+                ? await authSql.findCompaniesByIds(companyIds)
+                : await Company.find({ _id: { $in: companyIds }, deletedAt: null }).select(
+                      'name email ownerUser deletedAt'
+                  )
+            : [];
+        const companiesWithMembership = mapCompaniesWithMembership(req.user.companies || [], companies);
+
         const token = signAccessToken({
             userId: req.user._id,
             email: req.user.email,
@@ -1023,10 +1077,25 @@ router.post('/switch-company', authenticateToken, async (req, res) => {
             companyId: cid
         });
 
+        const activeCompany = isPostgresPrimary()
+            ? await authSql.loadCompanyForSubscription(cid)
+            : await Company.findById(cid).select('name subscription');
+        const activeMembership = companiesWithMembership.find((e) => normalizeCompanyId(e) === cid) || null;
+        const activeMembershipDisplayName =
+            typeof activeMembership?.displayName === 'string' ? activeMembership.displayName.trim() : '';
+        const activeMembershipIsOwner =
+            Boolean(activeMembership?.isOwner) || activeMembership?.companyRole === 'owner';
+        const resolvedName =
+            activeMembershipDisplayName ||
+            (activeMembershipIsOwner && activeCompany?.name ? activeCompany.name : req.user.name);
+
         res.json({
             message: 'Company context updated',
             token,
-            activeCompanyId: cid
+            activeCompanyId: cid,
+            companies: companiesWithMembership,
+            companyName: activeCompany?.name || null,
+            userName: resolvedName
         });
     } catch (error) {
         console.error('Switch company error:', error);

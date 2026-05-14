@@ -14,7 +14,8 @@ const {
     getMonthYearDateRange
 } = require('../services/attendanceReportService');
 const { createNotification } = require('../services/notificationService');
-const { getAttendanceTodayString } = require('../services/attendanceDateUtils');
+const { getAttendanceTodayString, dateStrInTimeZone, ATTENDANCE_TIMEZONE } = require('../services/attendanceDateUtils');
+const { validateCheckoutAccomplishmentNote } = require('../utils/checkoutNote');
 const { rolloverStaleOpenSessionsForUser } = require('../services/attendanceReminderService');
 const membershipCompanyId = (entry) => {
     if (!entry) return null;
@@ -86,6 +87,20 @@ const readOptionalLatLng = (body) => {
     return { ok: true, coords: { latitude, longitude } };
 };
 
+/** WGS84 coordinates required for attendance actions. */
+const readRequiredLatLng = (body) => {
+    const r = readOptionalLatLng(body);
+    if (!r.ok) return r;
+    if (!r.coords) {
+        return {
+            ok: false,
+            message:
+                'Location is required for check-in and check-out. Enable location permission in your browser and try again.'
+        };
+    }
+    return r;
+};
+
 /** Open session = checked in but not checked out yet (multiple sessions per day allowed after checkout) */
 const openSessionFilter = {
     $or: [{ checkOut: { $exists: false } }, { checkOut: null }]
@@ -154,7 +169,7 @@ router.post('/check-in', authenticateToken, async (req, res) => {
                     attendance: att
                 });
             }
-            const loc = readOptionalLatLng(req.body);
+            const loc = readRequiredLatLng(req.body);
             if (!loc.ok) {
                 return res.status(400).json({ message: loc.message });
             }
@@ -185,7 +200,7 @@ router.post('/check-in', authenticateToken, async (req, res) => {
             });
         }
 
-        const loc = readOptionalLatLng(req.body);
+        const loc = readRequiredLatLng(req.body);
         if (!loc.ok) {
             return res.status(400).json({ message: loc.message });
         }
@@ -197,10 +212,8 @@ router.post('/check-in', authenticateToken, async (req, res) => {
             checkIn: new Date(),
             status: 'present'
         });
-        if (loc.coords) {
-            attendance.checkInLatitude = loc.coords.latitude;
-            attendance.checkInLongitude = loc.coords.longitude;
-        }
+        attendance.checkInLatitude = loc.coords.latitude;
+        attendance.checkInLongitude = loc.coords.longitude;
 
         await attendance.save();
 
@@ -229,7 +242,7 @@ router.post('/check-out', authenticateToken, async (req, res) => {
             if (!row) {
                 return res.status(404).json({ message: 'No open check-in found.' });
             }
-            const loc = readOptionalLatLng(req.body);
+            const loc = readRequiredLatLng(req.body);
             if (!loc.ok) {
                 return res.status(400).json({ message: loc.message });
             }
@@ -238,15 +251,16 @@ router.post('/check-out', authenticateToken, async (req, res) => {
             const durationMs = checkOutTime - new Date(p.checkIn);
             const durationMins = Math.max(0, Math.floor(durationMs / 60000));
             const checkoutNoteRaw = req.body?.note ?? req.body?.tasksDone;
-            let note = p.note;
-            if (checkoutNoteRaw != null && String(checkoutNoteRaw).trim() !== '') {
-                note = String(checkoutNoteRaw).trim().slice(0, 4000);
+            const noteCheck = validateCheckoutAccomplishmentNote(checkoutNoteRaw);
+            if (!noteCheck.ok) {
+                return res.status(400).json({ message: noteCheck.message, code: 'CHECKOUT_NOTE_INVALID' });
             }
+            const note = noteCheck.value;
             await row.update({
                 checkOut: checkOutTime,
                 duration: durationMins,
-                checkOutLatitude: loc.coords ? loc.coords.latitude : p.checkOutLatitude,
-                checkOutLongitude: loc.coords ? loc.coords.longitude : p.checkOutLongitude,
+                checkOutLatitude: loc.coords.latitude,
+                checkOutLongitude: loc.coords.longitude,
                 note
             });
             const attendance = await attendanceSql.hydrateAttendance(
@@ -268,7 +282,7 @@ router.post('/check-out', authenticateToken, async (req, res) => {
             return res.status(404).json({ message: 'No open check-in found.' });
         }
 
-        const loc = readOptionalLatLng(req.body);
+        const loc = readRequiredLatLng(req.body);
         if (!loc.ok) {
             return res.status(400).json({ message: loc.message });
         }
@@ -279,15 +293,15 @@ router.post('/check-out', authenticateToken, async (req, res) => {
 
         attendance.checkOut = checkOutTime;
         attendance.duration = durationMins;
-        if (loc.coords) {
-            attendance.checkOutLatitude = loc.coords.latitude;
-            attendance.checkOutLongitude = loc.coords.longitude;
-        }
+        attendance.checkOutLatitude = loc.coords.latitude;
+        attendance.checkOutLongitude = loc.coords.longitude;
 
         const checkoutNoteRaw = req.body?.note ?? req.body?.tasksDone;
-        if (checkoutNoteRaw != null && String(checkoutNoteRaw).trim() !== '') {
-            attendance.note = String(checkoutNoteRaw).trim().slice(0, 4000);
+        const noteCheck = validateCheckoutAccomplishmentNote(checkoutNoteRaw);
+        if (!noteCheck.ok) {
+            return res.status(400).json({ message: noteCheck.message, code: 'CHECKOUT_NOTE_INVALID' });
         }
+        attendance.note = noteCheck.value;
 
         // Optional logic: Mark as half-day if duration is less than X hours (e.g., 4 hours = 240 mins)
         // Leaving it as 'present' by default unless logic is strictly defined, or admin changes it.
@@ -365,9 +379,10 @@ router.put(
                 if (checkIn !== undefined) {
                     const d = new Date(checkIn);
                     if (Number.isNaN(d.getTime())) {
-                        return res.status(400).json({ message: 'Invalid checkIn date' });
+                        return res.status(400).json({ message: 'Invalid checkIn date', code: 'INVALID_CHECK_IN' });
                     }
                     updates.checkIn = d;
+                    updates.date = dateStrInTimeZone(d, ATTENDANCE_TIMEZONE);
                     unsetContinuousCheckIn = true;
                 }
                 if (checkOut !== undefined) {
@@ -376,14 +391,14 @@ router.put(
                     } else {
                         const d = new Date(checkOut);
                         if (Number.isNaN(d.getTime())) {
-                            return res.status(400).json({ message: 'Invalid checkOut date' });
+                            return res.status(400).json({ message: 'Invalid checkOut date', code: 'INVALID_CHECK_OUT' });
                         }
                         updates.checkOut = d;
                     }
                 }
                 if (status !== undefined) {
                     if (!['present', 'half-day', 'absent'].includes(status)) {
-                        return res.status(400).json({ message: 'Invalid status' });
+                        return res.status(400).json({ message: 'Invalid status', code: 'INVALID_STATUS' });
                     }
                     updates.status = status;
                 }
@@ -402,7 +417,8 @@ router.put(
                     const cout = new Date(nextCheckOut);
                     if (cout <= cin) {
                         return res.status(400).json({
-                            message: 'checkOut must be after checkIn'
+                            message: 'checkOut must be after checkIn',
+                            code: 'CHECKOUT_BEFORE_CHECKIN'
                         });
                     }
                     updates.duration = Math.floor((cout - cin) / 60000);
@@ -458,9 +474,10 @@ router.put(
             if (checkIn !== undefined) {
                 const d = new Date(checkIn);
                 if (Number.isNaN(d.getTime())) {
-                    return res.status(400).json({ message: 'Invalid checkIn date' });
+                    return res.status(400).json({ message: 'Invalid checkIn date', code: 'INVALID_CHECK_IN' });
                 }
                 attendance.checkIn = d;
+                attendance.date = dateStrInTimeZone(d, ATTENDANCE_TIMEZONE);
                 unsetContinuousCheckIn = true;
             }
 
@@ -470,7 +487,7 @@ router.put(
                 } else {
                     const d = new Date(checkOut);
                     if (Number.isNaN(d.getTime())) {
-                        return res.status(400).json({ message: 'Invalid checkOut date' });
+                        return res.status(400).json({ message: 'Invalid checkOut date', code: 'INVALID_CHECK_OUT' });
                     }
                     attendance.checkOut = d;
                 }
@@ -478,7 +495,7 @@ router.put(
 
             if (status !== undefined) {
                 if (!['present', 'half-day', 'absent'].includes(status)) {
-                    return res.status(400).json({ message: 'Invalid status' });
+                    return res.status(400).json({ message: 'Invalid status', code: 'INVALID_STATUS' });
                 }
                 attendance.status = status;
             }
@@ -494,7 +511,8 @@ router.put(
                 const cout = new Date(attendance.checkOut);
                 if (cout <= cin) {
                     return res.status(400).json({
-                        message: 'checkOut must be after checkIn'
+                        message: 'checkOut must be after checkIn',
+                        code: 'CHECKOUT_BEFORE_CHECKIN'
                     });
                 }
                 attendance.duration = Math.floor((cout - cin) / 60000);

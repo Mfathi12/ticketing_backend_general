@@ -72,6 +72,8 @@ const corsOptions = {
         'Authorization',
         'X-Requested-With',
         'x-lang',
+        'x-company-id',
+        'Accept',
         'Range',
         'Cache-Control',
         'Pragma'

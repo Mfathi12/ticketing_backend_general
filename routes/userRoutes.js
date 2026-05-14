@@ -2,8 +2,9 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const { Op } = require('sequelize');
-const { User, Company } = require('../models');
-const { authenticateToken } = require('../middleware/auth');
+const { Types } = require('mongoose');
+const { User, Company, Project, ProjectPersonalNote } = require('../models');
+const { authenticateToken, signAccessToken } = require('../middleware/auth');
 const { sendUserInviteEmail } = require('../services/emailService');
 const { canAddMembers, getCompanyPlan } = require('../services/subscriptionService');
 const { isPostgresEnabled } = require('../db/postgres');
@@ -20,6 +21,14 @@ const membershipCompanyId = (entry) => {
     if (typeof raw === 'object' && raw._id) return String(raw._id);
     return String(raw);
 };
+
+const companyRowId = (company) => {
+    if (!company) return '';
+    if (company._id != null) return String(company._id);
+    if (company.id != null) return String(company.id);
+    return '';
+};
+
 const mapCompaniesWithMembership = async (memberships = []) => {
     const companyIds = memberships
         .map((entry) => membershipCompanyId(entry))
@@ -28,13 +37,13 @@ const mapCompaniesWithMembership = async (memberships = []) => {
     const companies = companyIds.length
         ? isPostgresPrimary()
             ? await authSql.findCompaniesByIds(companyIds)
-            : await Company.find({ _id: { $in: companyIds } }).select('name email ownerUser')
+            : await Company.find({ _id: { $in: companyIds }, deletedAt: null }).select('name email ownerUser deletedAt')
         : [];
 
     return memberships.map((entry) => {
         const entryCompanyId = membershipCompanyId(entry);
         const matchedCompany = companies.find(
-            (company) => entryCompanyId && company._id.toString() === entryCompanyId
+            (company) => entryCompanyId && companyRowId(company) === String(entryCompanyId)
         );
         return {
             companyId: entryCompanyId,
@@ -359,6 +368,15 @@ router.delete('/delete-account/:userId', authenticateToken, async (req, res) => 
             Boolean(userMembership.isOwner) || String(userMembership.companyRole || '').toLowerCase() === 'owner';
         if (targetIsOwnerMongo && !invokerIsCompanyOwner) {
             return res.status(400).json({ message: 'Company owner cannot be removed' });
+        }
+
+        const companyOid = Types.ObjectId.isValid(companyId) ? new Types.ObjectId(companyId) : companyId;
+        const userOid = Types.ObjectId.isValid(userId) ? new Types.ObjectId(userId) : userId;
+        await Project.updateMany({ company: companyOid }, { $pull: { assigned_users: userOid } });
+        const projectsInCompany = await Project.find({ company: companyOid }).select('_id').lean();
+        const projectObjectIds = projectsInCompany.map((p) => p._id).filter(Boolean);
+        if (projectObjectIds.length) {
+            await ProjectPersonalNote.deleteMany({ user: userOid, project: { $in: projectObjectIds } });
         }
 
         user.companies = (user.companies || []).filter(
@@ -923,6 +941,309 @@ router.put('/update-profile', authenticateToken, async (req, res) => {
         });
     } catch (error) {
         console.error('Update profile error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+router.post('/workspaces', authenticateToken, async (req, res) => {
+    try {
+        const userId = req.user._id;
+        const userEmail = req.user.email;
+        const trimmed = String(req.body?.companyName || '').trim();
+        if (trimmed.length < 2) {
+            return res.status(400).json({ message: 'Company name must be at least 2 characters.' });
+        }
+        const switchToNew = req.body?.switchToNew !== false && req.body?.switchToNew !== 'false';
+
+        if (isPostgresPrimary()) {
+            try {
+                const { companyId } = await authSql.createAnotherOwnedCompany({
+                    userId,
+                    userEmail,
+                    companyName: trimmed,
+                    displayName: req.user.name
+                });
+                const nextCompanyId = switchToNew ? String(companyId) : req.companyId
+                    ? String(req.companyId)
+                    : String(companyId);
+                const token = signAccessToken({
+                    userId,
+                    email: userEmail,
+                    role: req.user.role,
+                    companyId: nextCompanyId
+                });
+                const freshUser = await authSql.findUserById(userId);
+                const companiesWithMembership = await mapCompaniesWithMembership(freshUser.companies || []);
+                const activeCompany = await authSql.loadCompanyForSubscription(nextCompanyId);
+                const activeMembership = companiesWithMembership.find(
+                    (e) => membershipCompanyId(e) === nextCompanyId
+                );
+                const activeMembershipDisplayName =
+                    typeof activeMembership?.displayName === 'string'
+                        ? activeMembership.displayName.trim()
+                        : '';
+                const activeMembershipIsOwner =
+                    Boolean(activeMembership?.isOwner) || activeMembership?.companyRole === 'owner';
+                const resolvedName =
+                    activeMembershipDisplayName ||
+                    (activeMembershipIsOwner && activeCompany?.name ? activeCompany.name : freshUser.name);
+
+                return res.status(201).json({
+                    message: 'Workspace created',
+                    token,
+                    activeCompanyId: nextCompanyId,
+                    companyName: activeCompany?.name || null,
+                    userName: resolvedName,
+                    user: {
+                        id: freshUser._id,
+                        name: resolvedName,
+                        title: freshUser.title,
+                        email: freshUser.email,
+                        role: freshUser.role,
+                        companies: companiesWithMembership
+                    }
+                });
+            } catch (e) {
+                if (e.code === 'DUPLICATE_COMPANY_NAME') {
+                    return res.status(409).json({
+                        message: 'You already have a company with this name. Please choose a different company name.'
+                    });
+                }
+                throw e;
+            }
+        }
+
+        const ownerUser = await User.findById(userId);
+        if (!ownerUser) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+        const dup = await Company.findOne({
+            ownerUser: ownerUser._id,
+            name: new RegExp(`^${trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+            deletedAt: null
+        }).select('_id');
+        if (dup) {
+            return res.status(409).json({
+                message: 'You already have a company with this name. Please choose a different company name.'
+            });
+        }
+        const company = await Company.create({
+            name: trimmed,
+            email: String(userEmail).toLowerCase().trim(),
+            ownerUser: ownerUser._id,
+            subscription: {
+                planId: 'free',
+                status: 'active',
+                isTrial: false,
+                trialEndsAt: null,
+                expiresAt: null,
+                graceEndsAt: null
+            },
+            members: [
+                {
+                    user: ownerUser._id,
+                    role: 'owner',
+                    isOwner: true
+                }
+            ]
+        });
+        if (!Array.isArray(ownerUser.companies)) {
+            ownerUser.companies = [];
+        }
+        const already = ownerUser.companies.some(
+            (entry) => membershipCompanyId(entry) === company._id.toString()
+        );
+        if (!already) {
+            ownerUser.companies.push({
+                company: company._id,
+                displayName: ownerUser.name,
+                companyRole: 'owner',
+                isOwner: true
+            });
+        }
+        if (ownerUser.role !== 'super_admin') {
+            ownerUser.role = 'owner';
+        }
+        await ownerUser.save();
+
+        const nextCompanyId = switchToNew ? String(company._id) : req.companyId
+            ? String(req.companyId)
+            : String(company._id);
+        const token = signAccessToken({
+            userId,
+            email: userEmail,
+            role: ownerUser.role,
+            companyId: nextCompanyId
+        });
+        const freshUser = await User.findById(userId).select('-password').lean();
+        const companiesWithMembership = await mapCompaniesWithMembership(freshUser.companies || []);
+        const activeCompany = await Company.findById(nextCompanyId).select('name');
+        const activeMembership = companiesWithMembership.find(
+            (e) => membershipCompanyId(e) === nextCompanyId
+        );
+        const activeMembershipDisplayName =
+            typeof activeMembership?.displayName === 'string' ? activeMembership.displayName.trim() : '';
+        const activeMembershipIsOwner =
+            Boolean(activeMembership?.isOwner) || activeMembership?.companyRole === 'owner';
+        const resolvedName =
+            activeMembershipDisplayName ||
+            (activeMembershipIsOwner && activeCompany?.name ? activeCompany.name : freshUser.name);
+
+        return res.status(201).json({
+            message: 'Workspace created',
+            token,
+            activeCompanyId: nextCompanyId,
+            companyName: activeCompany?.name || null,
+            userName: resolvedName,
+            user: {
+                id: freshUser._id,
+                name: resolvedName,
+                title: freshUser.title,
+                email: freshUser.email,
+                role: freshUser.role,
+                companies: companiesWithMembership
+            }
+        });
+    } catch (error) {
+        console.error('Create workspace error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+router.patch('/workspaces/:companyId', authenticateToken, async (req, res) => {
+    try {
+        const companyId = String(req.params.companyId || '').trim();
+        if (!companyId) {
+            return res.status(400).json({ message: 'companyId is required' });
+        }
+        const newName = String(req.body?.name ?? req.body?.companyName ?? '').trim();
+        if (newName.length < 2) {
+            return res.status(400).json({ message: 'Company name must be at least 2 characters.' });
+        }
+
+        if (isPostgresPrimary()) {
+            try {
+                await authSql.updateCompanyNameIfAllowedSql({
+                    userId: req.user._id,
+                    companyId,
+                    newName
+                });
+            } catch (e) {
+                if (e.code === 'FORBIDDEN') {
+                    return res.status(403).json({ message: e.message });
+                }
+                if (e.code === 'NOT_MEMBER' || e.code === 'NOT_FOUND') {
+                    return res.status(404).json({ message: e.message });
+                }
+                if (e.code === 'DUPLICATE_COMPANY_NAME') {
+                    return res.status(409).json({
+                        message: 'You already have a company with this name. Please choose a different company name.'
+                    });
+                }
+                throw e;
+            }
+        } else {
+            const m = (req.user.companies || []).find((e) => membershipCompanyId(e) === companyId);
+            if (!m) {
+                return res.status(404).json({ message: 'Not a member of this company' });
+            }
+            const role = String(m.companyRole || '').toLowerCase();
+            const canEdit = Boolean(m.isOwner) || role === 'owner' || role === 'admin';
+            if (!canEdit) {
+                return res.status(403).json({
+                    message: 'Only company owner or admin can rename the workspace'
+                });
+            }
+            const company = await Company.findById(companyId);
+            if (!company || company.deletedAt) {
+                return res.status(404).json({ message: 'Company not found' });
+            }
+            const dup = await Company.findOne({
+                ownerUser: company.ownerUser,
+                name: new RegExp(`^${newName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+                _id: { $ne: company._id },
+                deletedAt: null
+            });
+            if (dup) {
+                return res.status(409).json({
+                    message: 'You already have a company with this name. Please choose a different company name.'
+                });
+            }
+            company.name = newName;
+            await company.save();
+        }
+
+        const freshUser = isPostgresPrimary()
+            ? await authSql.findUserById(req.user._id)
+            : await User.findById(req.user._id).select('-password').lean();
+        const companiesWithMembership = await mapCompaniesWithMembership(freshUser.companies || []);
+
+        return res.json({
+            message: 'Workspace updated',
+            companies: companiesWithMembership
+        });
+    } catch (error) {
+        console.error('Rename workspace error:', error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+router.delete('/workspaces/:companyId', authenticateToken, async (req, res) => {
+    try {
+        const companyId = String(req.params.companyId || '').trim();
+        if (!companyId) {
+            return res.status(400).json({ message: 'companyId is required' });
+        }
+        if (req.companyId && String(req.companyId) === companyId) {
+            return res.status(400).json({
+                message: 'Switch to another workspace before deleting this one.'
+            });
+        }
+
+        const remaining = (req.user.companies || []).filter((e) => membershipCompanyId(e) !== companyId);
+        if (remaining.length === 0) {
+            return res.status(400).json({ message: 'You cannot delete your only workspace.' });
+        }
+
+        if (isPostgresPrimary()) {
+            try {
+                await authSql.softDeleteCompanyAsOwnerSql({ userId: req.user._id, companyId });
+            } catch (e) {
+                if (e.code === 'FORBIDDEN') {
+                    return res.status(403).json({ message: e.message });
+                }
+                if (e.code === 'NOT_FOUND') {
+                    return res.status(404).json({ message: e.message });
+                }
+                throw e;
+            }
+        } else {
+            const company = await Company.findById(companyId);
+            if (!company) {
+                return res.status(404).json({ message: 'Company not found' });
+            }
+            if (String(company.ownerUser) !== String(req.user._id)) {
+                return res.status(403).json({ message: 'Only the company owner can delete this workspace' });
+            }
+            company.deletedAt = new Date();
+            await company.save();
+            await User.updateMany(
+                { 'companies.company': company._id },
+                { $pull: { companies: { company: company._id } } }
+            );
+        }
+
+        const freshUser = isPostgresPrimary()
+            ? await authSql.findUserById(req.user._id)
+            : await User.findById(req.user._id).select('-password').lean();
+        const companiesWithMembership = await mapCompaniesWithMembership(freshUser.companies || []);
+
+        return res.json({
+            message: 'Workspace deleted',
+            companies: companiesWithMembership
+        });
+    } catch (error) {
+        console.error('Delete workspace error:', error);
         res.status(500).json({ message: 'Internal server error' });
     }
 });

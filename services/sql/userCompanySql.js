@@ -1,5 +1,6 @@
 const bcrypt = require('bcryptjs');
 const mongoose = require('mongoose');
+const { Op } = require('sequelize');
 const { getSequelizeModels, getSequelize } = require('../../db/postgres');
 const authSql = require('./authSql');
 const { loadCompanyWithMembers } = require('./companySql');
@@ -176,12 +177,30 @@ const deleteAccountSql = async ({ companyId, userId }) => {
     const m = requireModels();
     const sql = getSequelize();
     return sql.transaction(async (t) => {
+        const cid = String(companyId);
+        const uid = String(userId);
+        const projectRows = await m.Project.findAll({
+            where: { companyId: cid },
+            attributes: ['id'],
+            transaction: t
+        });
+        const projectIds = projectRows.map((r) => r.id).filter(Boolean);
+        if (projectIds.length) {
+            await m.ProjectAssignee.destroy({
+                where: { userId: uid, projectId: { [Op.in]: projectIds } },
+                transaction: t
+            });
+            await m.ProjectPersonalNote.destroy({
+                where: { userId: uid, projectId: { [Op.in]: projectIds } },
+                transaction: t
+            });
+        }
         await m.UserCompany.destroy({
-            where: { userId: String(userId), companyId: String(companyId) },
+            where: { userId: uid, companyId: cid },
             transaction: t
         });
         await m.CompanyMember.destroy({
-            where: { userId: String(userId), companyId: String(companyId) },
+            where: { userId: uid, companyId: cid },
             transaction: t
         });
         return { ok: true };

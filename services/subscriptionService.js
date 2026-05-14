@@ -167,9 +167,28 @@ const resolveCheckoutUnitPrice = (plan) => {
     return n;
 };
 
+/** DB catalog overrides must not set the free tier below code defaults (stale admin rows caused maxProjects=1). */
+const enforceFreePlanLimitFloors = (merged) => {
+    if (!merged || merged.id !== 'free' || !merged.limits) return;
+    const baseline = SUBSCRIPTION_PLANS.find((p) => p.id === 'free');
+    if (!baseline?.limits) return;
+    for (const key of ['maxProjects', 'maxMembers']) {
+        const floor = baseline.limits[key];
+        if (floor == null || !Number.isFinite(Number(floor))) continue;
+        const cur = merged.limits[key];
+        const n = Number(cur);
+        if (!Number.isFinite(n) || n < Number(floor)) {
+            merged.limits[key] = floor;
+        }
+    }
+};
+
 const mergePlanWithOverride = (basePlan, overrideDoc) => {
     const merged = cloneJson(basePlan);
-    if (!overrideDoc) return merged;
+    if (!overrideDoc) {
+        enforceFreePlanLimitFloors(merged);
+        return merged;
+    }
     const ov = overrideDoc.toObject ? overrideDoc.toObject() : { ...overrideDoc };
     // Never copy DB primary key onto catalog objects — Sequelize raw rows use `id` for row PK and would overwrite plan slug (basic/pro/…).
     const skip = new Set(['_id', '__v', 'id', 'planId', 'createdAt', 'updatedAt']);
@@ -193,6 +212,7 @@ const mergePlanWithOverride = (basePlan, overrideDoc) => {
             merged[key] = val;
         }
     });
+    enforceFreePlanLimitFloors(merged);
     return merged;
 };
 
@@ -460,21 +480,41 @@ const getLocalizedPlans = async (lang = 'en') => {
                 name: tr.name || plan.name,
                 description: tr.description || plan.description,
                 billingPeriod: tr.billingPeriod || plan.billingPeriod,
-                // Always use code-backed features so plan limits (e.g. projects) stay in sync with enforcement.
                 features: localizedFromCode.features
             };
-            // Safety fallback: if Arabic requested but DB row is stale/English, return trusted Arabic defaults.
+
             if (normalized === 'ar') {
-                const payloadText = [
-                    localizedFromDb.name,
-                    localizedFromDb.description,
-                    localizedFromDb.billingPeriod,
-                    ...(localizedFromDb.features || [])
-                ].join(' ');
-                if (!hasArabicChars(payloadText)) {
-                    return localizePlan(plan, 'ar');
-                }
+                return {
+                    ...localizedFromDb,
+                    name: tr?.name && hasArabicChars(tr.name) ? tr.name : localizedFromCode.name,
+                    description:
+                        tr?.description && hasArabicChars(tr.description)
+                            ? tr.description
+                            : localizedFromCode.description,
+                    billingPeriod:
+                        tr?.billingPeriod && hasArabicChars(tr.billingPeriod)
+                            ? tr.billingPeriod
+                            : localizedFromCode.billingPeriod,
+                    features: localizedFromCode.features
+                };
             }
+
+            if (normalized === 'en') {
+                return {
+                    ...localizedFromDb,
+                    name: tr?.name && hasArabicChars(tr.name) ? localizedFromCode.name : (tr.name || localizedFromCode.name),
+                    description:
+                        tr?.description && hasArabicChars(tr.description)
+                            ? localizedFromCode.description
+                            : (tr.description || localizedFromCode.description),
+                    billingPeriod:
+                        tr?.billingPeriod && hasArabicChars(tr.billingPeriod)
+                            ? localizedFromCode.billingPeriod
+                            : (tr.billingPeriod || localizedFromCode.billingPeriod),
+                    features: localizedFromCode.features
+                };
+            }
+
             return localizedFromDb;
         });
     } catch (error) {

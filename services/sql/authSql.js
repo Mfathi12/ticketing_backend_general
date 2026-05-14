@@ -21,7 +21,8 @@ const companySummaryFromRow = (row) => {
         _id: id,
         name: row.name,
         email: row.email,
-        ownerUser: row.ownerUserId
+        ownerUser: row.ownerUserId,
+        deletedAt: row.deletedAt || null
     };
     o.toString = () => String(id);
     return o;
@@ -129,7 +130,11 @@ const addFcmToken = async (userId, token) => {
 
 const findCompaniesByIds = async (ids) => {
     const { Company } = requireModels();
-    const list = await Company.findAll({ where: { id: ids.map(String) } });
+    const uniq = [...new Set((ids || []).map(String).filter(Boolean))];
+    if (!uniq.length) return [];
+    const list = await Company.findAll({
+        where: { id: { [Op.in]: uniq }, deletedAt: null }
+    });
     return list.map((c) => companySummaryFromRow(c.get({ plain: true })));
 };
 
@@ -318,6 +323,180 @@ const registerCompany = async ({
     });
 };
 
+/**
+ * Logged-in user creates an additional owned workspace (PostgreSQL).
+ */
+const createAnotherOwnedCompany = async ({ userId, userEmail, companyName, displayName }) => {
+    const { User, Company, UserCompany, CompanyMember } = requireModels();
+    const sql = getSequelize();
+    const trimmedCompanyName = String(companyName || '').trim();
+    const trimmedDisplay = String(displayName || '').trim();
+    if (trimmedCompanyName.length < 2) {
+        const e = new Error('Company name must be at least 2 characters.');
+        e.code = 'COMPANY_NAME_TOO_SHORT';
+        throw e;
+    }
+
+    return sql.transaction(async (t) => {
+        const ownerRow = await User.findByPk(String(userId), { transaction: t });
+        if (!ownerRow) {
+            const e = new Error('User not found');
+            e.code = 'USER_NOT_FOUND';
+            throw e;
+        }
+        const ownerPlain = ownerRow.get({ plain: true });
+        const resolvedDisplay =
+            trimmedDisplay ||
+            String(ownerPlain.name || '')
+                .trim()
+                .slice(0, 200);
+
+        const dupName = await Company.findOne({
+            where: {
+                ownerUserId: String(userId),
+                name: { [Op.iLike]: trimmedCompanyName }
+            },
+            transaction: t
+        });
+        if (dupName) {
+            const err = new Error('DUPLICATE_COMPANY_NAME');
+            err.code = 'DUPLICATE_COMPANY_NAME';
+            throw err;
+        }
+
+        const companyId = newObjectIdString();
+        const emailForCompany = String(userEmail || ownerPlain.email || '')
+            .toLowerCase()
+            .trim();
+
+        await Company.create(
+            {
+                id: companyId,
+                name: trimmedCompanyName,
+                email: emailForCompany,
+                ownerUserId: String(userId),
+                subscriptionPlanId: DEFAULT_SUBSCRIPTION_PLAN_ID,
+                subscriptionStatus: 'active',
+                subscriptionIsTrial: false,
+                subscriptionTrialEndsAt: null,
+                subscriptionExpiresAt: null,
+                subscriptionGraceEndsAt: null
+            },
+            { transaction: t }
+        );
+
+        await CompanyMember.create(
+            {
+                id: newObjectIdString(),
+                companyId,
+                userId: String(userId),
+                role: 'owner',
+                isOwner: true
+            },
+            { transaction: t }
+        );
+
+        const alreadyMember = await UserCompany.findOne({
+            where: { userId: String(userId), companyId },
+            transaction: t
+        });
+        if (!alreadyMember) {
+            await UserCompany.create(
+                {
+                    id: newObjectIdString(),
+                    userId: String(userId),
+                    companyId,
+                    displayName: resolvedDisplay,
+                    companyRole: 'owner',
+                    isOwner: true
+                },
+                { transaction: t }
+            );
+        }
+
+        if (ownerPlain.role !== 'super_admin') {
+            await User.update({ role: 'owner' }, { where: { id: String(userId) }, transaction: t });
+        }
+
+        return { companyId, name: trimmedCompanyName };
+    });
+};
+
+const updateCompanyNameIfAllowedSql = async ({ userId, companyId, newName }) => {
+    const { Company, UserCompany } = requireModels();
+    const trimmed = String(newName || '').trim();
+    if (trimmed.length < 2) {
+        const e = new Error('Company name must be at least 2 characters.');
+        e.code = 'COMPANY_NAME_TOO_SHORT';
+        throw e;
+    }
+    const uc = await UserCompany.findOne({
+        where: { userId: String(userId), companyId: String(companyId) }
+    });
+    if (!uc) {
+        const e = new Error('Not a member of this company');
+        e.code = 'NOT_MEMBER';
+        throw e;
+    }
+    const role = String(uc.companyRole || '').toLowerCase();
+    const canEdit = Boolean(uc.isOwner) || role === 'owner' || role === 'admin';
+    if (!canEdit) {
+        const e = new Error('Only company owner or admin can rename the workspace');
+        e.code = 'FORBIDDEN';
+        throw e;
+    }
+    const company = await Company.findByPk(String(companyId));
+    if (!company || company.get('deletedAt')) {
+        const e = new Error('Company not found');
+        e.code = 'NOT_FOUND';
+        throw e;
+    }
+    const ownerId = String(company.ownerUserId || '');
+    const dup = await Company.findOne({
+        where: {
+            ownerUserId: ownerId,
+            name: { [Op.iLike]: trimmed },
+            id: { [Op.ne]: String(companyId) }
+        }
+    });
+    if (dup) {
+        const err = new Error('DUPLICATE_COMPANY_NAME');
+        err.code = 'DUPLICATE_COMPANY_NAME';
+        throw err;
+    }
+    await Company.update({ name: trimmed }, { where: { id: String(companyId) } });
+    return { companyId: String(companyId), name: trimmed };
+};
+
+const softDeleteCompanyAsOwnerSql = async ({ userId, companyId }) => {
+    const { Company, UserCompany, CompanyMember } = requireModels();
+    const sql = getSequelize();
+    return sql.transaction(async (t) => {
+        const company = await Company.findByPk(String(companyId), {
+            transaction: t,
+            lock: t.LOCK.UPDATE
+        });
+        if (!company) {
+            const e = new Error('Company not found');
+            e.code = 'NOT_FOUND';
+            throw e;
+        }
+        const plain = company.get({ plain: true });
+        if (String(plain.ownerUserId) !== String(userId)) {
+            const e = new Error('Only the company owner can delete this workspace');
+            e.code = 'FORBIDDEN';
+            throw e;
+        }
+        if (plain.deletedAt) {
+            return { alreadyDeleted: true };
+        }
+        await UserCompany.destroy({ where: { companyId: String(companyId) }, transaction: t });
+        await CompanyMember.destroy({ where: { companyId: String(companyId) }, transaction: t });
+        await Company.update({ deletedAt: new Date() }, { where: { id: String(companyId) }, transaction: t });
+        return { ok: true };
+    });
+};
+
 module.exports = {
     findUserByEmail,
     findUserById,
@@ -330,6 +509,9 @@ module.exports = {
     setPasswordAndVerifyEmail,
     createPlatformAdmin,
     registerCompany,
+    createAnotherOwnedCompany,
+    updateCompanyNameIfAllowedSql,
+    softDeleteCompanyAsOwnerSql,
     companySummaryFromRow,
     subscriptionFromRow,
     wrapCompanyForSubscription,

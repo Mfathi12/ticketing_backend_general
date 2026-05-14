@@ -345,6 +345,78 @@ const updateProjectStatus = async (projectId, status) => {
     return m.Project.findByPk(String(projectId));
 };
 
+/** Full delete: tickets + chat + notes + assignees, then project (company-scoped). */
+const deleteProjectFull = async (companyId, projectId) => {
+    const m = requireModels();
+    const sql = getSequelize();
+    const cid = String(companyId);
+    const pid = String(projectId);
+    await sql.transaction(async (t) => {
+        const tickets = await m.Ticket.findAll({
+            where: { companyId: cid, projectId: pid },
+            attributes: ['id'],
+            transaction: t
+        });
+        const ticketIds = tickets.map((x) => x.id);
+        if (ticketIds.length) {
+            const replies = await m.TicketReply.findAll({
+                where: { ticketId: { [Op.in]: ticketIds } },
+                attributes: ['id'],
+                transaction: t
+            });
+            const replyIds = replies.map((x) => x.id);
+            if (replyIds.length) {
+                await m.TicketReplyImage.destroy({
+                    where: { ticketReplyId: { [Op.in]: replyIds } },
+                    transaction: t
+                });
+            }
+            await m.TicketReply.destroy({ where: { ticketId: { [Op.in]: ticketIds } }, transaction: t });
+            await m.TicketImage.destroy({ where: { ticketId: { [Op.in]: ticketIds } }, transaction: t });
+            await m.TicketHandler.destroy({ where: { ticketId: { [Op.in]: ticketIds } }, transaction: t });
+            await m.TicketCc.destroy({ where: { ticketId: { [Op.in]: ticketIds } }, transaction: t });
+            await m.Ticket.destroy({ where: { id: { [Op.in]: ticketIds } }, transaction: t });
+        }
+
+        const convs = await m.Conversation.findAll({
+            where: { companyId: cid, projectId: pid },
+            attributes: ['id'],
+            transaction: t
+        });
+        const convIds = convs.map((x) => x.id);
+        if (convIds.length) {
+            await m.Message.update(
+                { replyToId: null, parentMessageId: null },
+                { where: { conversationId: { [Op.in]: convIds } }, transaction: t }
+            );
+            const msgs = await m.Message.findAll({
+                where: { conversationId: { [Op.in]: convIds } },
+                attributes: ['id'],
+                transaction: t
+            });
+            const msgIds = msgs.map((x) => x.id);
+            if (msgIds.length) {
+                await m.MessageReadBy.destroy({ where: { messageId: { [Op.in]: msgIds } }, transaction: t });
+                await m.MessageMention.destroy({ where: { messageId: { [Op.in]: msgIds } }, transaction: t });
+                await m.MessageReaction.destroy({ where: { messageId: { [Op.in]: msgIds } }, transaction: t });
+            }
+            await m.Message.destroy({ where: { conversationId: { [Op.in]: convIds } }, transaction: t });
+            await m.ConversationParticipant.destroy({
+                where: { conversationId: { [Op.in]: convIds } },
+                transaction: t
+            });
+            await m.Conversation.destroy({ where: { id: { [Op.in]: convIds } }, transaction: t });
+        }
+
+        await m.ProjectAssignee.destroy({ where: { projectId: pid }, transaction: t });
+        await m.ProjectPersonalNote.destroy({ where: { projectId: pid }, transaction: t });
+        const n = await m.Project.destroy({ where: { id: pid, companyId: cid }, transaction: t });
+        if (!n) {
+            throw new Error('Project not found or company mismatch');
+        }
+    });
+};
+
 module.exports = {
     countProjectsByCompany,
     findProjectByNameCI,
@@ -361,6 +433,7 @@ module.exports = {
     updateNote,
     deleteNote,
     updateProjectStatus,
+    deleteProjectFull,
     projectToResponseShape,
     loadAssigneesForProjects
 };
