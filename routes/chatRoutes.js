@@ -24,6 +24,21 @@ const membershipCompanyId = (entry) => {
     return String(raw);
 };
 
+/** Tell both users to refetch chat list (e.g. new DM created). */
+const emitChatConversationsRefresh = (req, userIds = []) => {
+    const io = req.app.get('io');
+    if (!io || !Array.isArray(userIds) || !userIds.length) return;
+    const payload = { type: 'chat_conversations_changed', timestamp: new Date().toISOString() };
+    const seen = new Set();
+    for (const raw of userIds) {
+        if (raw == null) continue;
+        const id = String(raw);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        io.to(`user:${id}`).emit('chat_conversations_changed', payload);
+    }
+};
+
 /** Mongoose participant ids are ObjectIds; Array#includes fails across instances with the same id */
 const isConversationParticipant = (conversation, userId) => {
     if (!conversation?.participants?.length || !userId) return false;
@@ -241,12 +256,14 @@ router.post('/conversation', authenticateToken, async (req, res) => {
                 participantId,
                 req.user._id
             );
+            const convOut = attachConversationDisplayNames(
+                conversation,
+                activeCompanyId,
+                req.activeCompanyName || null
+            );
+            emitChatConversationsRefresh(req, [req.user._id, participantId]);
             return res.json({
-                conversation: attachConversationDisplayNames(
-                    conversation,
-                    activeCompanyId,
-                    req.activeCompanyName || null
-                )
+                conversation: convOut
             });
         }
 
@@ -280,6 +297,7 @@ router.post('/conversation', authenticateToken, async (req, res) => {
             await conversation.populate('participants', 'name email title role');
         }
 
+        emitChatConversationsRefresh(req, [req.user._id, participantId]);
         res.json({
             conversation: attachConversationDisplayNames(
                 conversation,

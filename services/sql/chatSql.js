@@ -376,53 +376,55 @@ const syncProjectConversationsAndList = async (companyId, userId, activeCompanyN
         attributes: ['projectId']
     });
     const projectIds = [...new Set(links.map((l) => l.projectId))];
-    if (!projectIds.length) return [];
-    const assignedProjects = await m.Project.findAll({
-        where: { id: { [Op.in]: projectIds }, companyId: cid }
-    });
-    for (const proj of assignedProjects) {
-        const plain = proj.get ? proj.get({ plain: true }) : proj;
-        let conv = await getProjectConversationRow(cid, plain.id);
-        const assignees = await m.ProjectAssignee.findAll({ where: { projectId: plain.id } });
-        const pids = assignees.map((x) => x.userId);
-        if (!conv) {
-            await createProjectConversationRow({
-                companyId: cid,
-                projectId: plain.id,
-                participantIds: pids.length ? pids : [uid],
-                groupName: plain.project_name,
-                groupAdminId: pids[0] || uid
-            });
-        } else {
-            if (!(await isUserInConversation(conv.id, uid))) {
-                const max = await m.ConversationParticipant.max('sortOrder', {
-                    where: { conversationId: conv.id }
+    // Never return early: users with no project assignments still have direct (DM) chats.
+    if (projectIds.length) {
+        const assignedProjects = await m.Project.findAll({
+            where: { id: { [Op.in]: projectIds }, companyId: cid }
+        });
+        for (const proj of assignedProjects) {
+            const plain = proj.get ? proj.get({ plain: true }) : proj;
+            let conv = await getProjectConversationRow(cid, plain.id);
+            const assignees = await m.ProjectAssignee.findAll({ where: { projectId: plain.id } });
+            const pids = assignees.map((x) => x.userId);
+            if (!conv) {
+                await createProjectConversationRow({
+                    companyId: cid,
+                    projectId: plain.id,
+                    participantIds: pids.length ? pids : [uid],
+                    groupName: plain.project_name,
+                    groupAdminId: pids[0] || uid
                 });
-                await m.ConversationParticipant.create({
-                    id: newObjectIdString(),
-                    conversationId: conv.id,
-                    userId: uid,
-                    sortOrder: (max != null ? max : -1) + 1
-                });
-            }
-            const cur = await participantUserIds(conv.id);
-            const setEq =
-                cur.length === pids.length && pids.every((id) => cur.map(String).includes(String(id)));
-            if (!setEq || conv.groupName !== plain.project_name) {
-                await m.ConversationParticipant.destroy({ where: { conversationId: conv.id } });
-                let order = 0;
-                for (const pid of pids) {
+            } else {
+                if (!(await isUserInConversation(conv.id, uid))) {
+                    const max = await m.ConversationParticipant.max('sortOrder', {
+                        where: { conversationId: conv.id }
+                    });
                     await m.ConversationParticipant.create({
                         id: newObjectIdString(),
                         conversationId: conv.id,
-                        userId: String(pid),
-                        sortOrder: order++
+                        userId: uid,
+                        sortOrder: (max != null ? max : -1) + 1
                     });
                 }
-                await m.Conversation.update(
-                    { groupName: plain.project_name },
-                    { where: { id: conv.id } }
-                );
+                const cur = await participantUserIds(conv.id);
+                const setEq =
+                    cur.length === pids.length && pids.every((id) => cur.map(String).includes(String(id)));
+                if (!setEq || conv.groupName !== plain.project_name) {
+                    await m.ConversationParticipant.destroy({ where: { conversationId: conv.id } });
+                    let order = 0;
+                    for (const pid of pids) {
+                        await m.ConversationParticipant.create({
+                            id: newObjectIdString(),
+                            conversationId: conv.id,
+                            userId: String(pid),
+                            sortOrder: order++
+                        });
+                    }
+                    await m.Conversation.update(
+                        { groupName: plain.project_name },
+                        { where: { id: conv.id } }
+                    );
+                }
             }
         }
     }
