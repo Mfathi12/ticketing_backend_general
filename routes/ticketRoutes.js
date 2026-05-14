@@ -12,6 +12,7 @@ const ticketSql = require('../services/sql/ticketSql');
 const authSql = require('../services/sql/authSql');
 const { Op } = require('sequelize');
 
+
 const router = express.Router();
 const membershipCompanyId = (entry) => {
     if (!entry) return null;
