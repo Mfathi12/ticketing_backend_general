@@ -345,6 +345,18 @@ router.delete('/delete-account/:userId', authenticateToken, async (req, res) => 
                 return res.status(400).json({ message: 'Company owner cannot be removed' });
             }
             await userCompanySql.deleteAccountSql({ companyId, userId });
+            try {
+                const io = req.app.get('io');
+                if (io) {
+                    io.to(`user:${String(userId)}`).emit('removed_from_company', {
+                        type: 'removed_from_company',
+                        companyId: String(companyId),
+                        timestamp: new Date()
+                    });
+                }
+            } catch (socketErr) {
+                console.error('removed_from_company socket emit:', socketErr);
+            }
             return res.json({ message: 'User removed from company successfully' });
         }
 
@@ -388,6 +400,19 @@ router.delete('/delete-account/:userId', authenticateToken, async (req, res) => 
             (member) => member.user.toString() !== userId
         );
         await company.save();
+
+        try {
+            const io = req.app.get('io');
+            if (io) {
+                io.to(`user:${String(userId)}`).emit('removed_from_company', {
+                    type: 'removed_from_company',
+                    companyId: String(companyId),
+                    timestamp: new Date()
+                });
+            }
+        } catch (socketErr) {
+            console.error('removed_from_company socket emit:', socketErr);
+        }
 
         res.json({ message: 'User removed from company successfully' });
     } catch (error) {
