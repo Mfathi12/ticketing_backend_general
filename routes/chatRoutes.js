@@ -39,6 +39,19 @@ const emitChatConversationsRefresh = (req, userIds = []) => {
     }
 };
 
+/** Socket rooms are `user:<jwt user id>` — normalize ObjectId / populated user / string. */
+const socketUserId = (raw) => {
+    if (raw == null) return '';
+    if (typeof raw === 'object' && raw._id != null) return String(raw._id);
+    return String(raw);
+};
+
+const emitToUserRoom = (io, rawUserId, event, payload) => {
+    const uid = socketUserId(rawUserId);
+    if (!io || !uid) return;
+    io.to(`user:${uid}`).emit(event, payload);
+};
+
 /** Mongoose participant ids are ObjectIds; Array#includes fails across instances with the same id */
 const isConversationParticipant = (conversation, userId) => {
     if (!conversation?.participants?.length || !userId) return false;
@@ -790,11 +803,12 @@ router.post('/message', authenticateToken, async (req, res) => {
             const textPreview = (content || '').slice(0, 100);
             const participantIds = await chatSql.participantUserIds(conversationId);
             if (io) {
+                const convIdStr = String(conversationId);
                 for (const participantId of participantIds) {
                     if (String(participantId) !== req.user._id.toString()) {
-                        io.to(`user:${participantId}`).emit('new_chat_message', {
+                        emitToUserRoom(io, participantId, 'new_chat_message', {
                             type: 'new_chat_message',
-                            conversationId: conversationId,
+                            conversationId: convIdStr,
                             message: messagePayload,
                             timestamp: new Date()
                         });
@@ -881,11 +895,12 @@ router.post('/message', authenticateToken, async (req, res) => {
         const textPreview = (content || '').slice(0, 100);
 
         if (io) {
+            const convIdStr = String(conversationId);
             conversation.participants.forEach(participantId => {
                 if (participantId.toString() !== req.user._id.toString()) {
-                    io.to(`user:${participantId}`).emit('new_chat_message', {
+                    emitToUserRoom(io, participantId, 'new_chat_message', {
                         type: 'new_chat_message',
-                        conversationId: conversationId,
+                        conversationId: convIdStr,
                         message: message, // Send fully populated message
                         timestamp: new Date()
                     });
@@ -958,10 +973,11 @@ router.put('/message/:messageId', authenticateToken, async (req, res) => {
             const participantIds = await chatSql.participantUserIds(result.conversationId);
             const io = req.app.get('io');
             if (io) {
+                const convIdStr = String(result.conversationId);
                 for (const participantId of participantIds) {
-                    io.to(`user:${participantId}`).emit('message_updated', {
+                    emitToUserRoom(io, participantId, 'message_updated', {
                         type: 'message_updated',
-                        conversationId: result.conversationId,
+                        conversationId: convIdStr,
                         message: messageObj
                     });
                 }
@@ -1002,10 +1018,11 @@ router.put('/message/:messageId', authenticateToken, async (req, res) => {
         const conversation = await Conversation.findOne({ _id: message.conversation, company: activeCompanyId });
         const io = req.app.get('io');
         if (io && conversation) {
+            const convIdStr = String(message.conversation);
             conversation.participants.forEach(participantId => {
-                io.to(`user:${participantId}`).emit('message_updated', {
+                emitToUserRoom(io, participantId, 'message_updated', {
                     type: 'message_updated',
-                    conversationId: message.conversation,
+                    conversationId: convIdStr,
                     message: messageObj
                 });
             });
@@ -1040,11 +1057,13 @@ router.delete('/message/:messageId', authenticateToken, async (req, res) => {
             const participantIds = await chatSql.participantUserIds(result.conversationId);
             const io = req.app.get('io');
             if (io) {
+                const convIdStr = String(result.conversationId);
+                const msgIdStr = String(messageId);
                 for (const participantId of participantIds) {
-                    io.to(`user:${participantId}`).emit('message_deleted', {
+                    emitToUserRoom(io, participantId, 'message_deleted', {
                         type: 'message_deleted',
-                        conversationId: result.conversationId,
-                        messageId: messageId
+                        conversationId: convIdStr,
+                        messageId: msgIdStr
                     });
                 }
             }
@@ -1068,11 +1087,13 @@ router.delete('/message/:messageId', authenticateToken, async (req, res) => {
         const conversation = await Conversation.findOne({ _id: message.conversation, company: activeCompanyId });
         const io = req.app.get('io');
         if (io && conversation) {
+            const convIdStr = String(message.conversation);
+            const msgIdStr = String(messageId);
             conversation.participants.forEach(participantId => {
-                io.to(`user:${participantId}`).emit('message_deleted', {
+                emitToUserRoom(io, participantId, 'message_deleted', {
                     type: 'message_deleted',
-                    conversationId: message.conversation,
-                    messageId: messageId
+                    conversationId: convIdStr,
+                    messageId: msgIdStr
                 });
             });
         }
@@ -1106,11 +1127,13 @@ router.post('/message/:messageId/reaction', authenticateToken, async (req, res) 
             const participantIds = await chatSql.participantUserIds(result.conversationId);
             const io = req.app.get('io');
             if (io) {
+                const convIdStr = String(result.conversationId);
+                const msgIdStr = String(messageId);
                 for (const participantId of participantIds) {
-                    io.to(`user:${participantId}`).emit('message_reaction_updated', {
+                    emitToUserRoom(io, participantId, 'message_reaction_updated', {
                         type: 'message_reaction_updated',
-                        conversationId: result.conversationId,
-                        messageId: messageId,
+                        conversationId: convIdStr,
+                        messageId: msgIdStr,
                         reactions: result.reactions
                     });
                 }
@@ -1154,11 +1177,13 @@ router.post('/message/:messageId/reaction', authenticateToken, async (req, res) 
         const conversation = await Conversation.findOne({ _id: message.conversation, company: activeCompanyId });
         const io = req.app.get('io');
         if (io && conversation) {
+            const convIdStr = String(message.conversation);
+            const msgIdStr = String(messageId);
             conversation.participants.forEach(participantId => {
-                io.to(`user:${participantId}`).emit('message_reaction_updated', {
+                emitToUserRoom(io, participantId, 'message_reaction_updated', {
                     type: 'message_reaction_updated',
-                    conversationId: message.conversation,
-                    messageId: messageId,
+                    conversationId: convIdStr,
+                    messageId: msgIdStr,
                     reactions: message.reactions
                 });
             });
@@ -1226,11 +1251,13 @@ router.post('/message/:messageId/thread', authenticateToken, async (req, res) =>
             const io = req.app.get('io');
             if (io) {
                 const participantIds = await chatSql.participantUserIds(convId);
+                const convIdStr = String(convId);
+                const parentIdStr = String(messageId);
                 for (const participantId of participantIds) {
-                    io.to(`user:${participantId}`).emit('thread_reply', {
+                    emitToUserRoom(io, participantId, 'thread_reply', {
                         type: 'thread_reply',
-                        conversationId: convId,
-                        parentMessageId: messageId,
+                        conversationId: convIdStr,
+                        parentMessageId: parentIdStr,
                         message: threadResult.message,
                         threadCount: threadResult.threadCount
                     });
@@ -1292,11 +1319,13 @@ router.post('/message/:messageId/thread', authenticateToken, async (req, res) =>
         // Emit socket event for thread reply
         const io = req.app.get('io');
         if (io) {
+            const convIdStr = String(parentMessage.conversation);
+            const parentIdStr = String(messageId);
             conversation.participants.forEach(participantId => {
-                io.to(`user:${participantId}`).emit('thread_reply', {
+                emitToUserRoom(io, participantId, 'thread_reply', {
                     type: 'thread_reply',
-                    conversationId: parentMessage.conversation,
-                    parentMessageId: messageId,
+                    conversationId: convIdStr,
+                    parentMessageId: parentIdStr,
                     message: threadReply,
                     threadCount: parentMessage.threadCount
                 });
@@ -1486,13 +1515,13 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
             const senderName = getRequestDisplayName(req);
             const participantIds = await chatSql.participantUserIds(conversationId);
             if (io) {
+                const convIdStr = String(conversationId);
                 for (const participantId of participantIds) {
                     const participantIdStr = String(participantId);
                     if (participantIdStr !== req.user._id.toString()) {
-                        console.log(`Emitting new_chat_message (file) to user:${participantIdStr}`);
-                        io.to(`user:${participantIdStr}`).emit('new_chat_message', {
+                        emitToUserRoom(io, participantIdStr, 'new_chat_message', {
                             type: 'new_chat_message',
-                            conversationId: conversationId,
+                            conversationId: convIdStr,
                             message: {
                                 _id: messagePayload.id,
                                 sender: {
@@ -1607,13 +1636,13 @@ router.post('/message/file', authenticateToken, ensureChatAttachmentAllowed, upl
         const senderName = getRequestDisplayName(req);
 
         if (io) {
+            const convIdStr = String(conversationId);
             conversation.participants.forEach(participantId => {
                 const participantIdStr = participantId.toString();
                 if (participantIdStr !== req.user._id.toString()) {
-                    console.log(`Emitting new_chat_message (file) to user:${participantIdStr}`);
-                    io.to(`user:${participantIdStr}`).emit('new_chat_message', {
+                    emitToUserRoom(io, participantIdStr, 'new_chat_message', {
                         type: 'new_chat_message',
-                        conversationId: conversationId,
+                        conversationId: convIdStr,
                         message: {
                             _id: message._id,
                             sender: {
