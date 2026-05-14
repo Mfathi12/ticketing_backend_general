@@ -177,7 +177,7 @@ io.use(async (socket, next) => {
         }
 
         // Attach user info to socket
-        socket.userId = decoded.userId;
+        socket.userId = String(decoded.userId);
         socket.userEmail = decoded.email || user.email;
 
         console.log(`✓ Socket authentication successful for user: ${decoded.userId} (${socket.userEmail})`);
@@ -208,7 +208,15 @@ io.on('connection', (socket) => {
     // Join user's personal room
     const userRoom = `user:${socket.userId.toString()}`;
     socket.join(userRoom);
+    const joinedRooms = Array.from(socket.rooms);
     console.log(`  User ${socket.userId} joined room: ${userRoom}`);
+    if (process.env.DEBUG_CHAT_SOCKET === '1' || String(process.env.DEBUG_CHAT_SOCKET || '').toLowerCase() === 'true') {
+        console.log('[SOCKET_ROOMS]', {
+            userId: String(socket.userId),
+            socketId: socket.id,
+            rooms: joinedRooms
+        });
+    }
 
     // Handle disconnection
     socket.on('disconnect', (reason) => {
@@ -227,6 +235,16 @@ io.on('connection', (socket) => {
 // Export io for use in routes
 app.set('io', io);
 app.set('userSockets', userSockets);
+
+const { attachRedisAdapterIfConfigured } = require('./services/socketRedisAdapter');
+const socketAdapterReady = (async () => {
+    try {
+        await attachRedisAdapterIfConfigured(io);
+    } catch (err) {
+        console.error('[Socket.IO] Redis adapter bootstrap failed:', err?.message || err);
+    }
+})();
+app.set('socketAdapterReady', socketAdapterReady);
 
 // Middleware
 app.use(cors(corsOptions));

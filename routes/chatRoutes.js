@@ -24,6 +24,36 @@ const membershipCompanyId = (entry) => {
     return String(raw);
 };
 
+/** Socket rooms are `user:<jwt user id>` — normalize ObjectId / populated user / string. */
+const socketUserId = (raw) => {
+    if (raw == null) return '';
+    if (typeof raw === 'object' && raw._id != null) return String(raw._id);
+    return String(raw);
+};
+
+const debugChatSocket = () =>
+    process.env.DEBUG_CHAT_SOCKET === '1' || String(process.env.DEBUG_CHAT_SOCKET || '').toLowerCase() === 'true';
+
+const emitToUserRoom = (io, rawUserId, event, payload) => {
+    const uid = socketUserId(rawUserId);
+    if (!io || !uid) return;
+    if (debugChatSocket()) {
+        const conv = payload && typeof payload === 'object' ? payload.conversationId : undefined;
+        const mid =
+            payload && typeof payload === 'object' && payload.message
+                ? payload.message._id ?? payload.message.id
+                : payload && typeof payload === 'object'
+                  ? payload.messageId
+                  : undefined;
+        // eslint-disable-next-line no-console
+        console.log('[CHAT_SOCKET_EMIT]', event, `room=user:${uid}`, {
+            conversationId: conv != null ? String(conv) : undefined,
+            messageId: mid != null ? String(mid) : undefined
+        });
+    }
+    io.to(`user:${uid}`).emit(event, payload);
+};
+
 /** Tell both users to refetch chat list (e.g. new DM created). */
 const emitChatConversationsRefresh = (req, userIds = []) => {
     const io = req.app.get('io');
@@ -35,21 +65,8 @@ const emitChatConversationsRefresh = (req, userIds = []) => {
         const id = String(raw);
         if (seen.has(id)) continue;
         seen.add(id);
-        io.to(`user:${id}`).emit('chat_conversations_changed', payload);
+        emitToUserRoom(io, id, 'chat_conversations_changed', payload);
     }
-};
-
-/** Socket rooms are `user:<jwt user id>` — normalize ObjectId / populated user / string. */
-const socketUserId = (raw) => {
-    if (raw == null) return '';
-    if (typeof raw === 'object' && raw._id != null) return String(raw._id);
-    return String(raw);
-};
-
-const emitToUserRoom = (io, rawUserId, event, payload) => {
-    const uid = socketUserId(rawUserId);
-    if (!io || !uid) return;
-    io.to(`user:${uid}`).emit(event, payload);
 };
 
 /** Mongoose participant ids are ObjectIds; Array#includes fails across instances with the same id */
@@ -234,6 +251,19 @@ const ensureChatAttachmentAllowed = async (req, res, next) => {
         res.status(500).json({ message: 'Internal server error' });
     }
 };
+
+/** Wait for optional Redis Socket.IO adapter (cross-instance emits on Vercel / multi-node). */
+router.use(async (req, res, next) => {
+    try {
+        const p = req.app.get('socketAdapterReady');
+        if (p && typeof p.then === 'function') {
+            await p.catch(() => {});
+        }
+    } catch {
+        /* ignore */
+    }
+    next();
+});
 
 // Get or create conversation between two users
 router.post('/conversation', authenticateToken, async (req, res) => {
