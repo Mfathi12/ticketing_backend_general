@@ -173,7 +173,7 @@ const defineModels = (sequelize) => {
             time: { type: DataTypes.STRING },
             description: { type: DataTypes.TEXT, allowNull: false },
             status: {
-                type: DataTypes.ENUM('open', 'in_progress', 'resolved', 'closed'),
+                type: DataTypes.ENUM('open', 'in_progress', 'pending', 'resolved', 'closed'),
                 allowNull: false,
                 defaultValue: 'open'
             },
@@ -529,6 +529,17 @@ const defineModels = (sequelize) => {
 
     Project.belongsTo(Company, { foreignKey: { name: 'companyId', allowNull: true }, onDelete: 'SET NULL' });
     Company.hasMany(Project, { foreignKey: 'companyId' });
+
+    ProjectAssignee.belongsTo(Project, {
+        foreignKey: { name: 'projectId', allowNull: false },
+        onDelete: 'CASCADE'
+    });
+    ProjectAssignee.belongsTo(User, {
+        foreignKey: { name: 'userId', allowNull: false },
+        onDelete: 'CASCADE'
+    });
+    Project.hasMany(ProjectAssignee, { foreignKey: 'projectId' });
+    User.hasMany(ProjectAssignee, { foreignKey: 'userId' });
 
     Project.belongsToMany(User, {
         through: ProjectAssignee,
