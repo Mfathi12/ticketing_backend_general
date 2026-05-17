@@ -1,6 +1,7 @@
 const { Sequelize } = require('sequelize');
 const { defineModels } = require('./sequelize/models');
 const { ensurePersonalTasksTable } = require('../services/sql/personalTasksTable');
+const { ensureCompletionGifsTable } = require('../services/sql/completionGifsTable');
 const { ensurePostgresRoleColumnsCompat } = require('../services/sql/ensurePostgresRoleColumnsCompat');
 
 let sequelize = null;
@@ -67,6 +68,9 @@ const initPostgres = async () => {
     });
     await ensurePersonalTasksTable(sequelize).catch((err) => {
         console.error('PostgreSQL: ensure personal_tasks table failed:', err.message);
+    });
+    await ensureCompletionGifsTable(sequelize).catch((err) => {
+        console.error('PostgreSQL: ensure completion_gifs table failed:', err.message);
     });
     return { enabled: true, sequelize, models: sequelizeModels };
 };

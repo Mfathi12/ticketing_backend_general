@@ -9,6 +9,7 @@ const SubscriptionPlanContent = require('./subscriptionPlanContent');
 const PlanCatalogOverride = require('./planCatalogOverride');
 const ProjectPersonalNote = require('./projectPersonalNote');
 const { PersonalTask } = require('./personalTask');
+const CompletionGif = require('./completionGif');
 
 module.exports = {
     User,
@@ -22,5 +23,6 @@ module.exports = {
     Version,
     SubscriptionPlanContent,
     PlanCatalogOverride,
-    PersonalTask
+    PersonalTask,
+    CompletionGif
 };

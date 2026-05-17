@@ -10,7 +10,11 @@ const dictionaries = {
             version_required: 'Version is required',
             no_version_found: 'No version found'
         },
-        
+        completionGif: {
+            url_required: 'GIF url is required',
+            invalid_url: 'GIF url must be a valid https URL',
+            not_found: 'Completion GIF not found'
+        },
         subscription: {
             select_paid_plan: 'Please select a paid plan',
             only_card_supported: 'Only card payment is supported',
@@ -81,6 +85,11 @@ const dictionaries = {
         version: {
             version_required: 'الإصدار مطلوب',
             no_version_found: 'لا يوجد إصدار محفوظ'
+        },
+        completionGif: {
+            url_required: 'رابط صورة GIF مطلوب',
+            invalid_url: 'يجب أن يكون رابط GIF عنوان https صالحًا',
+            not_found: 'صورة الاحتفال غير موجودة'
         },
         subscription: {
             select_paid_plan: 'يرجى اختيار باقة مدفوعة',

@@ -1,7 +1,17 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const { authenticateToken } = require('../middleware/auth');
-const { User, Company, Project, Ticket, PlanCatalogOverride } = require('../models');
+const { User, Company, Project, Ticket, PlanCatalogOverride, CompletionGif } = require('../models');
+const { t } = require('../utils/i18n');
+const {
+    validateCompletionGifUrl,
+    normalizeTags,
+    normalizeWeight
+} = require('../utils/completionGifUrl');
+const completionGifSql = require('../services/sql/completionGifSql');
+const {
+    mongoToAdminShape
+} = require('./completionGifRoutes');
 const {
     getPlanById,
     addMonths,
@@ -850,6 +860,205 @@ router.post('/subscriptions/:companyId/cancel', async (req, res) => {
         if (e.status === 404) return res.status(404).json({ message: e.message });
         console.error(e);
         res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+/** Completion GIF catalog (all rows, including inactive). */
+router.get('/completion-gifs', async (req, res) => {
+    try {
+        if (isPostgresPrimary()) {
+            const gifs = await completionGifSql.listAll();
+            return res.json({ success: true, gifs });
+        }
+        const docs = await CompletionGif.find({}).sort({ createdAt: -1 }).lean();
+        res.json({
+            success: true,
+            gifs: docs.map((d) => mongoToAdminShape(d))
+        });
+    } catch (e) {
+        console.error('completion-gifs list', e);
+        res.status(500).json({
+            success: false,
+            message: t(req.lang, 'common.internal_server_error')
+        });
+    }
+});
+
+router.post('/completion-gifs', async (req, res) => {
+    try {
+        const body = req.body && typeof req.body === 'object' ? req.body : {};
+        if (!body.url) {
+            return res.status(400).json({
+                success: false,
+                message: t(req.lang, 'completionGif.url_required')
+            });
+        }
+        let url;
+        try {
+            url = validateCompletionGifUrl(body.url);
+        } catch {
+            return res.status(400).json({
+                success: false,
+                message: t(req.lang, 'completionGif.invalid_url')
+            });
+        }
+        let tags = [];
+        try {
+            tags = normalizeTags(body.tags);
+        } catch {
+            return res.status(400).json({
+                success: false,
+                message: t(req.lang, 'completionGif.invalid_url')
+            });
+        }
+        const weight = normalizeWeight(body.weight, 1);
+        const label =
+            body.label != null && String(body.label).trim()
+                ? String(body.label).trim().slice(0, 200)
+                : null;
+
+        if (isPostgresPrimary()) {
+            const gif = await completionGifSql.create({ url, label, tags, weight });
+            return res.status(201).json({ success: true, gif });
+        }
+
+        const doc = await CompletionGif.create({ url, label, tags, weight, isActive: true });
+        return res.status(201).json({
+            success: true,
+            gif: mongoToAdminShape(doc)
+        });
+    } catch (e) {
+        console.error('completion-gifs create', e);
+        res.status(500).json({
+            success: false,
+            message: t(req.lang, 'common.internal_server_error')
+        });
+    }
+});
+
+router.patch('/completion-gifs/:id', async (req, res) => {
+    try {
+        const id = String(req.params.id || '').trim();
+        if (!id) {
+            return res.status(400).json({
+                success: false,
+                message: t(req.lang, 'completionGif.not_found')
+            });
+        }
+        const body = req.body && typeof req.body === 'object' ? req.body : {};
+        const patch = {};
+
+        if (body.url !== undefined) {
+            try {
+                patch.url = validateCompletionGifUrl(body.url);
+            } catch {
+                return res.status(400).json({
+                    success: false,
+                    message: t(req.lang, 'completionGif.invalid_url')
+                });
+            }
+        }
+        if (body.label !== undefined) {
+            patch.label =
+                body.label != null && String(body.label).trim()
+                    ? String(body.label).trim().slice(0, 200)
+                    : null;
+        }
+        if (body.tags !== undefined) {
+            try {
+                patch.tags = normalizeTags(body.tags);
+            } catch {
+                return res.status(400).json({
+                    success: false,
+                    message: t(req.lang, 'completionGif.invalid_url')
+                });
+            }
+        }
+        if (body.weight !== undefined) {
+            patch.weight = normalizeWeight(body.weight, 1);
+        }
+        if (body.isActive !== undefined) {
+            patch.isActive = Boolean(body.isActive);
+        }
+
+        if (Object.keys(patch).length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: t(req.lang, 'completionGif.url_required')
+            });
+        }
+
+        if (isPostgresPrimary()) {
+            const gif = await completionGifSql.updateById(id, patch);
+            if (!gif) {
+                return res.status(404).json({
+                    success: false,
+                    message: t(req.lang, 'completionGif.not_found')
+                });
+            }
+            return res.json({ success: true, gif });
+        }
+
+        const doc = await CompletionGif.findByIdAndUpdate(
+            id,
+            { $set: patch },
+            { new: true }
+        );
+        if (!doc) {
+            return res.status(404).json({
+                success: false,
+                message: t(req.lang, 'completionGif.not_found')
+            });
+        }
+        return res.json({ success: true, gif: mongoToAdminShape(doc) });
+    } catch (e) {
+        console.error('completion-gifs patch', e);
+        res.status(500).json({
+            success: false,
+            message: t(req.lang, 'common.internal_server_error')
+        });
+    }
+});
+
+router.delete('/completion-gifs/:id', async (req, res) => {
+    try {
+        const id = String(req.params.id || '').trim();
+        if (!id) {
+            return res.status(400).json({
+                success: false,
+                message: t(req.lang, 'completionGif.not_found')
+            });
+        }
+
+        if (isPostgresPrimary()) {
+            const ok = await completionGifSql.deleteById(id);
+            if (!ok) {
+                return res.status(404).json({
+                    success: false,
+                    message: t(req.lang, 'completionGif.not_found')
+                });
+            }
+            return res.json({ success: true });
+        }
+
+        const doc = await CompletionGif.findByIdAndUpdate(
+            id,
+            { $set: { isActive: false } },
+            { new: true }
+        );
+        if (!doc) {
+            return res.status(404).json({
+                success: false,
+                message: t(req.lang, 'completionGif.not_found')
+            });
+        }
+        return res.json({ success: true, gif: mongoToAdminShape(doc) });
+    } catch (e) {
+        console.error('completion-gifs delete', e);
+        res.status(500).json({
+            success: false,
+            message: t(req.lang, 'common.internal_server_error')
+        });
     }
 });
 

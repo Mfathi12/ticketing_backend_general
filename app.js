@@ -33,6 +33,7 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const subscriptionRoutes = require('./routes/subscriptionRoutes');
 const platformAdminRoutes = require('./routes/platformAdminRoutes');
 const versionRoutes = require('./routes/versionRoutes');
+const completionGifRoutes = require('./routes/completionGifRoutes');
 const landingRoutes = require('./routes/landingRoutes');
 const personalTaskRoutes = require('./routes/personalTaskRoutes');
 const { languageMiddleware } = require('./middleware/language');
@@ -45,6 +46,7 @@ const { purgeStaleUnverifiedAccounts } = require('./services/unverifiedAccountPu
 
 // Import database seeder
 const { seedDefaultAdmin, seedDefaultAdminPostgres } = require('./utils/seedDatabase');
+const { ensureCompletionGifsSeeded } = require('./services/completionGifSeedService');
 
 /** CORS: أضف في .env مثلاً CORS_ORIGINS=https://موقعك.netlify.app,http://localhost:5173 — فارغ أو * = السماح بأي Origin (مناسب للتطوير) */
 const resolveCorsOrigin = () => {
@@ -700,6 +702,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/subscriptions', subscriptionRoutes);
 app.use('/api/platform-admin', platformAdminRoutes);
 app.use('/api/version', versionRoutes);
+app.use('/api/completion-gifs', completionGifRoutes);
 app.use('/api/landing', landingRoutes);
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -720,6 +723,9 @@ startPostgresInit()
             );
             if (!mongoUri && !process.env.VERCEL) {
                 await seedDefaultAdminPostgres();
+                await ensureCompletionGifsSeeded().catch((err) =>
+                    console.error('Completion GIF seed (Postgres startup):', err.message)
+                );
                 if (!isPostgresPrimary()) {
                     console.log(
                         'MongoDB is not configured: set POSTGRES_PRIMARY=true to enable attendance cron and purge on PostgreSQL.'
@@ -791,6 +797,11 @@ db.once('open', async () => {
     if (!process.env.VERCEL) {
         // Seed default admin user in persistent server only
         await seedDefaultAdmin();
+        if (!isPostgresPrimary()) {
+            await ensureCompletionGifsSeeded().catch((err) =>
+                console.error('Completion GIF seed (Mongo startup):', err.message)
+            );
+        }
 
         if (!isPostgresPrimary()) {
             purgeStaleUnverifiedAccounts().catch((err) =>

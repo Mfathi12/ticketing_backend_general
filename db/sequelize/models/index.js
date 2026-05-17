@@ -466,6 +466,19 @@ const defineModels = (sequelize) => {
         }
     );
 
+    const CompletionGif = sequelize.define(
+        'CompletionGif',
+        {
+            id: { type: DataTypes.STRING(24), primaryKey: true, defaultValue: newObjectIdString },
+            url: { type: DataTypes.STRING(2048), allowNull: false },
+            label: { type: DataTypes.STRING(200), allowNull: true },
+            tags: { type: DataTypes.JSONB, allowNull: false, defaultValue: [] },
+            weight: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 1 },
+            isActive: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true }
+        },
+        { tableName: 'completion_gifs', timestamps: true }
+    );
+
     const models = {
         User,
         Company,
@@ -492,7 +505,8 @@ const defineModels = (sequelize) => {
         SubscriptionPlanContent,
         PlanCatalogOverride,
         ProjectPersonalNote,
-        PersonalTask
+        PersonalTask,
+        CompletionGif
     };
 
     Company.belongsTo(User, { as: 'ownerUser', foreignKey: { name: 'ownerUserId', allowNull: false }, onDelete: 'RESTRICT' });
