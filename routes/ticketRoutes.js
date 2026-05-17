@@ -458,7 +458,10 @@ router.put('/edit-ticket/:ticketId', authenticateToken, async (req, res) => {
                 : [handler.toLowerCase().trim()];
         }
         if (status) updateData.status = status;
-        if (priority !== undefined) updateData.priority = priority;
+        if (priority !== undefined) {
+            updateData.priority =
+                priority === '' || priority == null ? null : priority;
+        }
         if (images !== undefined) {
             // Process images - convert base64 to files if needed
             if (Array.isArray(images)) {

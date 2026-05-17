@@ -265,18 +265,17 @@ const findTicketsMany = async (where) => {
 
 const userAssignedProjectIds = async (userId, companyId) => {
     const m = requireModels();
-    const pas = await m.ProjectAssignee.findAll({
+    const links = await m.ProjectAssignee.findAll({
         where: { userId: String(userId) },
-        include: [
-            {
-                model: m.Project,
-                where: { companyId: String(companyId) },
-                attributes: ['id'],
-                required: true
-            }
-        ]
+        attributes: ['projectId']
     });
-    return pas.map((p) => p.projectId);
+    const projectIds = [...new Set(links.map((l) => l.projectId).filter(Boolean))];
+    if (!projectIds.length) return [];
+    const projects = await m.Project.findAll({
+        where: { id: { [Op.in]: projectIds }, companyId: String(companyId) },
+        attributes: ['id']
+    });
+    return projects.map((p) => p.id);
 };
 
 const replaceChildEmails = async (Model, ticketId, fieldName, values, factory) => {
